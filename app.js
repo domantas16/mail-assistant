@@ -5,14 +5,14 @@ import {
 } from './lib.js';
 import * as auth from './auth.js';
 import { graph } from './graph.js';
-import { createDemo, cannedDraft } from './demo.js';
+import { createDemo, cannedDraft, DEMO_SHARED } from './demo.js';
 import * as ai from './ai.js';
 
 // ---------- settings & state ----------
 const DEFAULTS = {
   clientId: '', tenantId: '', apiKey: '', model: '', effort: 'low', myName: '', myRole: '',
   style: '', notes: '', useExamples: true, signatureHtml: '', addSignature: true,
-  draftFont: 'Aptos, Calibri, Arial, sans-serif', loadImages: false,
+  draftFont: 'Aptos, Calibri, Arial, sans-serif', loadImages: false, sharedMailboxes: '',
 };
 const cfg = () => ({ ...DEFAULTS, ...store.get('settings', {}) });
 const setCfg = (patch) => store.set('settings', { ...store.get('settings', {}), ...patch });
@@ -27,11 +27,52 @@ function resetState() {
     sel: null, thread: [], drafts: new Map(), compose: null,
     contactsTab: 'frequent', contacts: null, people: [], contactQ: '', contact: null, contactSeq: 0,
     examples: null,
-    chats: null, chat: null, chatQ: '', chatSeq: 0,
+    chats: null, chat: null, chatQ: '', chatSeq: 0, mailbox: null,
   });
 }
 resetState();
 const E = { app: $('#app'), side: $('#sidebar'), list: $('#listPane'), detail: $('#detailPane') };
+
+// ---------- mailboxes: your own plus shared ones (info@, sales@ ...) ----------
+const EMAIL = /[^\s<>,;"]+@[^\s<>,;"]+\.[^\s<>,;"]+/g;
+function mailboxes() {
+  if (S.mode === 'demo') return [DEMO_SHARED];
+  return [...new Set((cfg().sharedMailboxes.match(EMAIL) || []).map((x) => x.toLowerCase()))];
+}
+// The address that counts as "me" in the open mailbox (a shared mailbox sends as itself).
+const myAddr = () => S.mailbox || S.me?.email || '';
+
+function restoreMailbox() {
+  const saved = store.get('mailbox');
+  S.mailbox = saved && mailboxes().includes(saved) ? saved : null;
+  S.api.setMailbox(S.mailbox);
+}
+
+async function switchMailbox(address) {
+  const keep = { mode: S.mode, api: S.api, me: S.me, examples: S.examples };
+  resetState();
+  Object.assign(S, keep);
+  S.mailbox = address || null;
+  store.set('mailbox', S.mailbox);
+  S.api.setMailbox(S.mailbox);
+  E.app.classList.remove('show-detail');
+  E.list.innerHTML = '';
+  E.detail.innerHTML = loading(`Opening ${S.mailbox || 'your mailbox'}…`);
+  await loadFolders();
+  S.folder = S.folders.main[0] || { id: 'inbox', name: 'Inbox', key: 'inbox' };
+  openChats();
+}
+
+// ---------- pinned contacts (per mailbox) ----------
+const pinKey = () => `pins:${S.mailbox || 'me'}`;
+const getPins = () => store.get(pinKey(), []);
+const isPinned = (email) => getPins().some((p) => p.email === email);
+function togglePin(person) {
+  const pins = getPins();
+  const next = isPinned(person.email) ? pins.filter((p) => p.email !== person.email) : [...pins, { name: person.name, email: person.email }];
+  store.set(pinKey(), next);
+  toast(isPinned(person.email) ? `Pinned ${person.name}` : `Unpinned ${person.name}`, 'ok', 1500);
+}
 
 // ---------- start ----------
 async function boot() {
@@ -62,6 +103,7 @@ async function startLive(fresh) {
     return fail(e, true);
   }
   if (fresh) toast(`Signed in as ${S.me.email}`, 'ok');
+  restoreMailbox();
   await loadFolders();
   S.folder = S.folders.main[0] || { id: 'inbox', name: 'Inbox', key: 'inbox' };
   openChats();
@@ -74,6 +116,7 @@ async function startDemo() {
   store.set('demo', true);
   E.app.className = 'app';
   S.me = await S.api.me();
+  restoreMailbox();
   await loadFolders();
   S.folder = S.folders.main[0];
   openChats();
@@ -163,6 +206,7 @@ function renderSidebar() {
   const other = S.folders.other;
   E.side.innerHTML = `
     <div class="brand">${ICON.logo}<span>Mail Assistant</span>${S.mode === 'demo' ? '<span class="badge">Demo</span>' : ''}</div>
+    ${mailboxes().length ? `<label class="mbox" title="Mailbox">${ICON.inbox}<select id="mboxSel" aria-label="Mailbox"><option value="">${esc(S.me?.email || 'My mailbox')}</option>${mailboxes().map((x) => `<option value="${esc(x)}" ${S.mailbox === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>` : ''}
     <button class="btn ai block" data-act="compose">${ICON.pen}<span>New email</span></button>
     <nav class="nav">
       <button class="nav-item ${S.view === 'chats' ? 'active' : ''}" data-act="chats">${ICON.chat}<span class="nav-label">Chats</span>${(S.chats || []).reduce((n, c) => n + c.unread, 0) ? `<span class="count">${(S.chats || []).reduce((n, c) => n + c.unread, 0)}</span>` : ''}</button>
@@ -364,7 +408,7 @@ function renderThread() {
 }
 
 function msgHtml(m, open) {
-  const mine = m.from?.email && m.from.email === S.me?.email;
+  const mine = m.from?.email && m.from.email === myAddr();
   const to = m.to.map((x) => x.name || x.email).join(', ');
   const cc = m.cc.length ? `, cc ${m.cc.map((x) => x.name || x.email).join(', ')}` : '';
   return `<article class="msg ${open ? 'open' : ''} ${m.isDraft ? 'is-draft' : ''}" data-mid="${esc(m.id)}">
@@ -442,7 +486,7 @@ async function renderAtts(m, art) {
 // ---------- AI reply ----------
 function replyTarget() {
   const real = S.thread.filter((m) => !m.isDraft);
-  const others = real.filter((m) => m.from?.email && m.from.email !== S.me?.email);
+  const others = real.filter((m) => m.from?.email && m.from.email !== myAddr());
   return others.at(-1) || real.at(-1) || S.sel;
 }
 
@@ -450,7 +494,7 @@ function replyState() {
   const key = S.sel.conversationId || S.sel.id;
   if (!S.drafts.has(key)) {
     const t = replyTarget();
-    const others = [...t.to, ...t.cc].filter((x) => x.email && x.email !== S.me?.email && x.email !== t.from?.email);
+    const others = [...t.to, ...t.cc].filter((x) => x.email && x.email !== myAddr() && x.email !== t.from?.email);
     S.drafts.set(key, { note: '', text: '', history: null, mode: others.length ? 'all' : 'reply', busy: false, saved: null, meta: '' });
   }
   return S.drafts.get(key);
@@ -463,14 +507,15 @@ const QUICK = {
   'Fix grammar only': 'Only fix grammar, spelling and flow. Keep the content and length.',
 };
 
-function draftTools(st, saveAct) {
+function draftTools(st, saveAct, sendAct) {
   return `
     <div class="draft ${st.text || st.busy ? '' : 'hidden'}">
       ${st.subjectField || ''}
       <textarea id="draftText" class="draft-text" spellcheck="true" aria-label="Draft">${esc(st.text)}</textarea>
       <div class="as-row wrap">
         <button class="btn" data-act="copy-draft">${ICON.copy}<span>Copy</span></button>
-        <button class="btn primary" data-act="${saveAct}">${ICON.draft}<span>Save to Outlook drafts</span></button>
+        <button class="btn" data-act="${saveAct}">${ICON.draft}<span>Save to drafts</span></button>
+        <button class="btn ${st.confirmSend ? 'danger' : 'primary'}" data-act="${sendAct}">${ICON.send}<span>${st.confirmSend ? esc(st.confirmLabel) : 'Send'}</span></button>
         ${st.saved ? `<span class="saved">${S.mode === 'demo' ? 'Saved (demo)' : 'Saved to Drafts'}</span>${st.saved.webLink ? `<a class="btn subtle" href="${esc(st.saved.webLink)}" target="_blank" rel="noopener">${ICON.ext}<span>Open in Outlook</span></a>` : ''}` : ''}
         <span class="muted small meta">${esc(st.meta)}</span>
       </div>
@@ -483,7 +528,7 @@ function replyPanel(target, st) {
   const name = target.from?.name || target.from?.email || '';
   return `<section class="assistant ${st.busy ? 'busy' : ''}" id="assistant">
     <div class="as-head">
-      <div class="as-title">${ICON.spark}<b>Reply with AI</b><span class="muted small">to ${esc(name)}${st.mode === 'all' ? ' and others' : ''}</span></div>
+      <div class="as-title">${ICON.spark}<b>Reply with AI</b><span class="muted small">to ${esc(name)}${st.mode === 'all' ? ' and others' : ''}${S.mailbox ? `, from ${esc(S.mailbox)}` : ''}</span></div>
       <div class="seg" role="group" aria-label="Reply type">
         <button data-act="mode" data-mode="reply" class="${st.mode === 'reply' ? 'on' : ''}">Reply</button>
         <button data-act="mode" data-mode="all" class="${st.mode === 'all' ? 'on' : ''}">Reply all</button>
@@ -494,7 +539,7 @@ function replyPanel(target, st) {
       <button class="btn ai" data-act="draft" ${st.busy ? 'disabled' : ''}>${ICON.spark}<span>${st.busy ? 'Writing…' : st.text ? 'Draft again' : 'Draft reply'}</span></button>
       <span class="muted small">Ctrl + Enter</span>
     </div>
-    ${draftTools(st, 'save-draft')}
+    ${draftTools(st, 'save-draft', 'send-reply')}
   </section>`;
 }
 
@@ -643,6 +688,7 @@ async function saveReplyDraft(btn) {
   try {
     const html = textToHtml(text, c.draftFont) + signatureHtml(c);
     st.saved = await S.api.createReplyDraft(replyTarget().id, { replyAll: st.mode === 'all', html });
+    st.savedKey = `${st.mode}|${text}`;
     toast(S.mode === 'demo' ? 'Demo mode: saved to the sample Drafts folder.' : 'Saved to your Outlook Drafts. Review and send it from Outlook.', 'ok', 5000);
   } catch (e) {
     fail(e);
@@ -655,6 +701,74 @@ async function copyDraft() {
   if (!text) return;
   const ok = await copyRich(text, textToHtml(text, cfg().draftFont));
   toast(ok ? 'Copied. Paste it into your Outlook reply.' : 'Copy failed. Select the text and press Ctrl+C.', ok ? 'ok' : 'err');
+}
+
+// ---------- sending ----------
+// First click arms the button ("Confirm: send to …"); a second click within 6 s sends.
+async function sendDraft(btn, isNew) {
+  const st = isNew ? S.compose : replyState();
+  const text = $('#draftText')?.value.trim();
+  if (!text) return toast('Nothing to send yet.');
+  st.text = text;
+  const c = cfg();
+  let to = [];
+  if (isNew) {
+    st.to = $('#cTo').value;
+    st.subject = $('#cSubject').value.trim();
+    to = parseRecipients(st.to);
+    if (!to.length) return toast('Add at least one recipient email address.', 'err');
+    if (!st.subject) return toast('Add a subject first.', 'err');
+  }
+  if (!st.confirmSend) {
+    const target = isNew ? null : replyTarget();
+    const names = isNew ? to.map((x) => x.name.split(' ')[0]) : [target.from?.name || target.from?.email];
+    const extra = isNew ? 0 : st.mode === 'all' ? [...target.to, ...target.cc].filter((x) => x.email && x.email !== myAddr() && x.email !== target.from?.email).length : 0;
+    st.confirmSend = true;
+    st.confirmLabel = `Confirm: send to ${names.slice(0, 2).join(', ')}${names.length > 2 || extra ? ` +${Math.max(names.length - 2, 0) + extra}` : ''}${c.addSignature && !c.signatureHtml ? ' (no signature set)' : ''}`;
+    rerenderPanel();
+    setTimeout(() => { if (st.confirmSend) { st.confirmSend = false; if ($('#assistant')) rerenderPanel(); } }, 6000);
+    return;
+  }
+  st.confirmSend = false;
+  btn.disabled = true;
+  btn.lastChild.textContent = 'Sending…';
+  const html = textToHtml(text, c.draftFont) + signatureHtml(c);
+  try {
+    const key = isNew ? `${st.to}|${st.subject}|${text}` : `${st.mode}|${text}`;
+    let draft = st.saved && st.savedKey === key ? st.saved : null;
+    if (!draft) {
+      draft = isNew
+        ? await S.api.createDraft({ to, subject: st.subject, html })
+        : await S.api.createReplyDraft(replyTarget().id, { replyAll: st.mode === 'all', html });
+    }
+    await S.api.send(draft.id);
+    toast(`Sent${S.mailbox ? ` from ${S.mailbox}` : ''}`, 'ok', 4000);
+  } catch (e) {
+    fail(e);
+    return rerenderPanel();
+  }
+  if (isNew) {
+    S.compose = { to: '', subject: '', note: '', text: '', busy: false, saved: null, meta: '', history: null };
+    return renderCompose();
+  }
+  // Show the sent reply straight away (Outlook's search index can take a minute to catch up).
+  const target = replyTarget();
+  const sent = {
+    id: `sent-${Date.now()}`, conversationId: target.conversationId, from: { name: S.mailbox || S.me?.name || 'Me', email: myAddr() },
+    to: [target.from], cc: [], date: new Date().toISOString(), subject: `RE: ${target.subject.replace(/^re:\s*/i, '')}`,
+    bodyHtml: html, preview: text.slice(0, 140), isRead: true, isDraft: false, hasAttachments: false,
+  };
+  Object.assign(st, { note: '', text: '', history: null, saved: null, savedKey: null, meta: '' });
+  if (S.view === 'chats' && S.chat?.msgs) {
+    S.chat.msgs.push(sent);
+    const entry = S.chats?.find((x) => x.person.email === S.chat.person.email);
+    if (entry) entry.last = { ...sent, out: true };
+    drawChat();
+    renderChatItems();
+  } else {
+    S.thread.push(sent);
+    renderThread();
+  }
 }
 
 // ---------- new email ----------
@@ -680,7 +794,7 @@ function renderCompose() {
       <div class="suggest" id="cSuggest"></div>
       <label class="field">What's it about?<textarea id="cNote" rows="3" placeholder="A few words in any language, e.g. “follow up on the 1030 nm mirror quote, 5% off for 20 pcs”">${esc(c.note)}</textarea></label>
       <div class="as-row"><button class="btn ai" data-act="draft" ${c.busy ? 'disabled' : ''}>${ICON.spark}<span>${c.busy ? 'Writing…' : c.text ? 'Draft again' : 'Draft email'}</span></button><span class="muted small">Ctrl + Enter</span></div>
-      ${draftTools(st, 'save-new')}
+      ${draftTools(st, 'save-new', 'send-new')}
     </section>
   </div>`;
   wireDraftArea();
@@ -711,6 +825,7 @@ async function saveNewDraft(btn) {
   try {
     const conf = cfg();
     c.saved = await S.api.createDraft({ to, subject: c.subject, html: textToHtml(c.text, conf.draftFont) + signatureHtml(conf) });
+    c.savedKey = `${c.to}|${c.subject}|${c.text}`;
     toast(S.mode === 'demo' ? 'Demo mode: saved to the sample Drafts folder.' : 'Saved to your Outlook Drafts.', 'ok', 5000);
   } catch (e) {
     fail(e);
@@ -735,7 +850,7 @@ async function openChats() {
   else E.detail.innerHTML = empty(ICON.chat, 'Pick a chat', 'Every email with one person in a single conversation, like a messenger. Reply with a short note at the bottom.');
   if (S.chats) renderChatItems();
   try {
-    S.chats = await S.api.chats(S.me?.email);
+    S.chats = await S.api.chats(myAddr());
   } catch (e) {
     fail(e);
     S.chats ||= [];
@@ -747,16 +862,22 @@ function renderChatItems() {
   const box = $('#chitems');
   if (!box) return;
   const q = S.chatQ.trim().toLowerCase();
-  const list = (S.chats || []).filter((c) => !q || `${c.person.name} ${c.person.email}`.toLowerCase().includes(q));
-  box.innerHTML = list.length
-    ? list.map((c) => `<div class="item chat-item ${c.unread ? 'unread' : ''} ${S.chat?.person.email === c.person.email ? 'active' : ''}" data-act="chat" data-email="${esc(c.person.email)}" role="button" tabindex="0">
-        ${avatar(c.person, 44)}
-        <div class="item-main">
-          <div class="item-top"><span class="from">${esc(c.person.name)}</span><time>${esc(fmtDate(c.last.date))}</time></div>
-          <div class="prev">${c.last.out ? '<span class="you">You: </span>' : ''}${esc(c.last.preview || c.last.subject)}</div>
-        </div>
-        ${c.unread ? `<span class="badge-n">${c.unread}</span>` : ''}
-      </div>`).join('')
+  const match = (c) => !q || `${c.person.name} ${c.person.email}`.toLowerCase().includes(q);
+  const chats = S.chats || [];
+  const pins = getPins();
+  const pinned = pins.map((p) => chats.find((c) => c.person.email === p.email) || { person: p, last: null, unread: 0 }).filter(match);
+  const rest = chats.filter((c) => !isPinned(c.person.email)).filter(match);
+  const row = (c, pin) => `<div class="item chat-item ${c.unread ? 'unread' : ''} ${S.chat?.person.email === c.person.email ? 'active' : ''}" data-act="chat" data-email="${esc(c.person.email)}" role="button" tabindex="0">
+      ${avatar(c.person, 44)}
+      <div class="item-main">
+        <div class="item-top"><span class="from">${pin ? `<span class="pin-ic">${ICON.pin}</span>` : ''}${esc(c.person.name)}</span>${c.last ? `<time>${esc(fmtDate(c.last.date))}</time>` : ''}</div>
+        <div class="prev">${c.last ? `${c.last.out ? '<span class="you">You: </span>' : ''}${esc(c.last.preview || c.last.subject)}` : `<span class="you">${esc(c.person.email)}</span>`}</div>
+      </div>
+      ${c.unread ? `<span class="badge-n">${c.unread}</span>` : ''}
+    </div>`;
+  const head = (t) => (pinned.length ? `<div class="list-section">${t}</div>` : '');
+  box.innerHTML = pinned.length || rest.length
+    ? (pinned.length ? head('Pinned') + pinned.map((c) => row(c, true)).join('') : '') + (rest.length ? head('Recent') + rest.map((c) => row(c, false)).join('') : '')
     : `<div class="empty small">${q ? 'No matches.' : 'No conversations yet.'}</div>`;
 }
 
@@ -778,7 +899,7 @@ async function openChat(person) {
   if (seq !== S.chatSeq) return;
   S.chat.msgs = msgs;
   drawChat();
-  const unread = msgs.filter((m) => !m.isRead && m.from?.email !== S.me?.email);
+  const unread = msgs.filter((m) => !m.isRead && m.from?.email !== myAddr());
   for (const m of unread) {
     m.isRead = true;
     bumpUnread(m.folderId, -1);
@@ -791,14 +912,14 @@ async function openChat(person) {
 function drawChat() {
   const { person, msgs } = S.chat;
   if (!msgs) return;
-  const incoming = msgs.filter((m) => m.from?.email !== S.me?.email);
+  const incoming = msgs.filter((m) => m.from?.email !== myAddr());
   // Drafting replies to the latest email they sent; the whole chat is the context.
   S.sel = incoming.at(-1) || msgs.at(-1) || null;
   S.thread = msgs;
   let day = '', subj = '';
   const norm = (s) => (s || '').replace(/^((re|fw|fwd|aw|sv):\s*)+/i, '').trim().toLowerCase();
   const bubbles = msgs.map((m) => {
-    const out = m.from?.email === S.me?.email;
+    const out = m.from?.email === myAddr();
     const text = (m.chatText ??= htmlToText((m.bodyHtml || '').replace(/<blockquote[\s\S]*?<\/blockquote>/gi, '')));
     const short = text.length > 700 ? `${text.slice(0, 700).trim()}…` : text;
     const d = dayLabel(m.date);
@@ -820,6 +941,7 @@ function drawChat() {
       <button class="icon-btn only-mobile" data-act="back" aria-label="Back">${ICON.back}</button>
       ${avatar(person, 40)}
       <div class="grow"><b>${esc(person.name)}</b><small>${esc(person.email)}</small></div>
+      <button class="icon-btn ${isPinned(person.email) ? 'on' : ''}" data-act="pin" data-email="${esc(person.email)}" title="${isPinned(person.email) ? 'Unpin' : 'Pin to top'}" aria-label="${isPinned(person.email) ? 'Unpin' : 'Pin to top'}">${ICON.pin}</button>
       <button class="icon-btn" data-act="chat-contact" title="Contact details" aria-label="Contact details">${ICON.people}</button>
     </div>
     <div class="chat-body" id="chatBody">${bubbles || '<div class="empty small">No emails with this person yet.</div>'}</div>
@@ -882,6 +1004,7 @@ async function renderContact(x) {
     <div class="card contact-card">
       ${avatar(x, 64)}
       <div class="grow"><h1>${esc(x.name)}</h1>${x.jobTitle || x.company ? `<div class="muted">${esc([x.jobTitle, x.company].filter(Boolean).join(' · '))}</div>` : ''}</div>
+      <button class="btn" data-act="pin" data-email="${esc(x.email)}" data-name="${esc(x.name)}">${ICON.pin}<span>${isPinned(x.email) ? 'Unpin' : 'Pin to Chats'}</span></button>
       <button class="btn ai" data-act="write-to">${ICON.pen}<span>Write email</span></button>
     </div>
     <div class="card kv">
@@ -898,7 +1021,7 @@ async function renderContact(x) {
     if (S.contact !== x) return;
     S.withList = r.items;
     $('#withList').innerHTML = r.items.length
-      ? r.items.slice(0, 15).map((m, i) => `<div class="item compact" data-act="open-with" data-i="${i}" role="button" tabindex="0"><div class="item-main"><div class="item-top"><span class="from">${esc(m.from.email === S.me?.email ? `You → ${m.to.map((t) => t.name).join(', ')}` : m.from.name)}</span><time>${esc(fmtDate(m.date))}</time></div><div class="subj">${esc(m.subject)}</div><div class="prev">${esc(m.preview)}</div></div></div>`).join('')
+      ? r.items.slice(0, 15).map((m, i) => `<div class="item compact" data-act="open-with" data-i="${i}" role="button" tabindex="0"><div class="item-main"><div class="item-top"><span class="from">${esc(m.from.email === myAddr() ? `You → ${m.to.map((t) => t.name).join(', ')}` : m.from.name)}</span><time>${esc(fmtDate(m.date))}</time></div><div class="subj">${esc(m.subject)}</div><div class="prev">${esc(m.preview)}</div></div></div>`).join('')
       : '<div class="empty small">No emails found.</div>';
   } catch {
     if (S.contact === x) $('#withList').innerHTML = '<div class="empty small">Couldn\'t load emails.</div>';
@@ -923,6 +1046,9 @@ function openSettings(section) {
         <label>Directory (tenant) ID<input data-set="tenantId" value="${esc(c.tenantId)}" placeholder="${esc(CONFIG.tenantId || 'from IT')}" spellcheck="false" autocomplete="off"></label>
       </div>
       <p class="muted small">Redirect URI for IT: <code>${esc(auth.redirectUri())}</code> <button class="link" data-act="copy-text" data-text="${esc(auth.redirectUri())}">Copy</button></p>
+      <label>Shared mailboxes <span class="muted small">(one per line, e.g. info@company.com)</span>
+        <textarea data-set="sharedMailboxes" rows="3" placeholder="info@company.com" spellcheck="false">${esc(c.sharedMailboxes)}</textarea></label>
+      <p class="muted small">Use mailboxes you can already open in Outlook. Switch between them at the top of the sidebar. Sending from a shared mailbox also needs "Send as" rights on it.</p>
     </section>
 
     <section class="card" id="sec-ai"><h3>Claude (drafting)</h3>
@@ -992,7 +1118,7 @@ const flashSaved = debounce(() => {
 const pendingSaves = {};
 function saveField(key, value) {
   clearTimeout(pendingSaves[key]);
-  pendingSaves[key] = setTimeout(() => { setCfg({ [key]: value }); flashSaved(); }, 350);
+  pendingSaves[key] = setTimeout(() => { setCfg({ [key]: value }); flashSaved(); if (key === 'sharedMailboxes') renderSidebar(); }, 350);
 }
 
 // ---------- layout helpers ----------
@@ -1059,8 +1185,8 @@ async function onClick(ev) {
     case 'chats': return openChats();
     case 'chats-refresh': S.chats = null; return openChats();
     case 'chat': {
-      const c = S.chats?.find((x) => x.person.email === t.dataset.email);
-      return c && openChat(c.person);
+      const p = S.chats?.find((x) => x.person.email === t.dataset.email)?.person || getPins().find((x) => x.email === t.dataset.email);
+      return p && openChat(p);
     }
     case 'chat-open': {
       const m = S.chat?.msgs?.find((x) => x.id === t.dataset.id);
@@ -1109,7 +1235,7 @@ async function onClick(ev) {
       return;
     }
     case 'mark-unread': {
-      const last = S.thread.filter((m) => !m.isDraft && m.from?.email !== S.me?.email).at(-1) || S.sel;
+      const last = S.thread.filter((m) => !m.isDraft && m.from?.email !== myAddr()).at(-1) || S.sel;
       await S.api.markRead(last.id, false);
       last.isRead = false;
       const li = S.list.find((y) => y.id === last.id);
@@ -1138,6 +1264,14 @@ async function onClick(ev) {
     case 'copy-draft': return copyDraft();
     case 'save-draft': return saveReplyDraft(t);
     case 'save-new': return saveNewDraft(t);
+    case 'send-reply': return sendDraft(t, false);
+    case 'send-new': return sendDraft(t, true);
+    case 'pin': {
+      const p = S.chat?.person.email === t.dataset.email ? S.chat.person : S.contact?.email === t.dataset.email ? S.contact : { name: t.dataset.name, email: t.dataset.email };
+      togglePin(p);
+      if (S.view === 'chats') { drawChat(); renderChatItems(); } else if (S.view === 'contacts') renderContact(S.contact);
+      return;
+    }
     case 'pick': {
       const input = $('#cTo');
       const parts = input.value.split(/[,;]/).slice(0, -1).map((s) => s.trim()).filter(Boolean);
@@ -1216,6 +1350,7 @@ const debounceContacts = debounce(() => loadContacts(), 300);
 
 async function onChange(ev) {
   const el = ev.target;
+  if (el.id === 'mboxSel') return switchMailbox(el.value);
   if (el.dataset.set && (el.type === 'checkbox' || el.tagName === 'SELECT')) {
     setCfg({ [el.dataset.set]: el.type === 'checkbox' ? el.checked : el.value });
     if (el.dataset.set === 'useExamples') S.examples = null;

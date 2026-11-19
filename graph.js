@@ -5,7 +5,8 @@ import { htmlToText, textBodyToHtml, groupChats } from './lib.js';
 const BASE = 'https://graph.microsoft.com/v1.0';
 const LIST = 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,bodyPreview,isRead,isDraft,hasAttachments,conversationId,flag,importance,webLink,parentFolderId';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const known = {}; // well-known folder ids: inbox, drafts, sentitems, ...
+let known = {}; // well-known folder ids of the current mailbox: inbox, drafts, sentitems, ...
+let MB = '/me'; // current mailbox: your own, or a shared one via /users/{address}
 
 async function call(path, { method = 'GET', body, raw = false } = {}) {
   const url = path.startsWith('https://') ? path : BASE + path;
@@ -28,7 +29,8 @@ async function call(path, { method = 'GET', body, raw = false } = {}) {
       throw e;
     }
     if (raw) return res;
-    return res.status === 204 ? null : res.json();
+    const txt = await res.text(); // send returns 202 with an empty body
+    return txt ? JSON.parse(txt) : null;
   }
 }
 
@@ -63,6 +65,17 @@ const quote = (s) => encodeURIComponent(`"${String(s).replace(/"/g, '')}"`);
 const SIGNOFF = /^\s*(best|kind|warm|many thanks|thanks and)\s+(regards|wishes)|^\s*(regards|cheers|thank you|thanks|br),?\s*$|^\s*pagarbiai|^\s*su pagarba/i;
 
 export const graph = {
+  // Switch between your own mailbox (null) and a shared one, e.g. 'info@company.com'.
+  setMailbox(address) {
+    MB = address ? `/users/${encodeURIComponent(address)}` : '/me';
+    known = {};
+  },
+
+  // Sends a draft created by createReplyDraft or createDraft.
+  async send(draftId) {
+    await call(`${MB}/messages/${draftId}/send`, { method: 'POST' });
+  },
+
   async me() {
     const u = await call('/me?$select=displayName,mail,userPrincipalName,jobTitle');
     return { name: u.displayName || '', email: (u.mail || u.userPrincipalName || '').toLowerCase(), jobTitle: u.jobTitle || '' };
@@ -70,7 +83,7 @@ export const graph = {
 
   async folders() {
     const wk = ['inbox', 'drafts', 'sentitems', 'archive', 'junkemail', 'deleteditems'];
-    const got = await Promise.all(wk.map((w) => call(`/me/mailFolders/${w}?$select=id,displayName,unreadItemCount`).catch(() => null)));
+    const got = await Promise.all(wk.map((w) => call(`${MB}/mailFolders/${w}?$select=id,displayName,unreadItemCount`).catch(() => null)));
     wk.forEach((w, i) => { if (got[i]) known[w] = got[i].id; });
     const labels = { inbox: ['Inbox', 'inbox'], drafts: ['Drafts', 'draft'], sentitems: ['Sent', 'send'], archive: ['Archive', 'archive'], junkemail: ['Junk', 'folder'], deleteditems: ['Deleted', 'trash'] };
     const make = (w, i) => ({ id: got[i].id, key: w, name: labels[w][0], icon: labels[w][1], unread: w === 'inbox' || w === 'junkemail' ? got[i].unreadItemCount : 0 });
@@ -79,8 +92,8 @@ export const graph = {
     const skip = new Set(Object.values(known));
     const HIDE = /^(outbox|conversation history|sync issues.*|rss( feeds| subscriptions)?|scheduled|social activity notifications|yammer root|files|externalcontacts|personmetadata|quick step settings|clutter|notes|journal|tasks|calendar|contacts)$/i;
     const [top, kids] = await Promise.all([
-      call('/me/mailFolders?$top=100&$select=id,displayName,unreadItemCount').catch(() => ({ value: [] })),
-      known.inbox ? call('/me/mailFolders/inbox/childFolders?$top=100&$select=id,displayName,unreadItemCount').catch(() => ({ value: [] })) : { value: [] },
+      call(`${MB}/mailFolders?$top=100&$select=id,displayName,unreadItemCount`).catch(() => ({ value: [] })),
+      known.inbox ? call(`${MB}/mailFolders/inbox/childFolders?$top=100&$select=id,displayName,unreadItemCount`).catch(() => ({ value: [] })) : { value: [] },
     ]);
     const fold = (f, child) => ({ id: f.id, name: f.displayName, icon: 'folder', unread: f.unreadItemCount, child });
     const other = [
@@ -95,8 +108,8 @@ export const graph = {
     let url = next;
     if (!url) {
       url = search
-        ? `/me/messages?$search=${quote(search)}&$top=30&$select=${LIST}`
-        : `/me/mailFolders/${encodeURIComponent(folderId || 'inbox')}/messages?$top=40&$orderby=receivedDateTime desc&$select=${LIST}`;
+        ? `${MB}/messages?$search=${quote(search)}&$top=30&$select=${LIST}`
+        : `${MB}/mailFolders/${encodeURIComponent(folderId || 'inbox')}/messages?$top=40&$orderby=receivedDateTime desc&$select=${LIST}`;
     }
     const r = await call(url);
     return { items: (r.value || []).map(mapMsg), next: r['@odata.nextLink'] || null };
@@ -106,11 +119,11 @@ export const graph = {
     let items = [];
     if (msg.conversationId) {
       const filter = encodeURIComponent(`conversationId eq '${msg.conversationId.replace(/'/g, "''")}'`);
-      const r = await call(`/me/messages?$filter=${filter}&$top=50&$select=${LIST},uniqueBody`);
+      const r = await call(`${MB}/messages?$filter=${filter}&$top=50&$select=${LIST},uniqueBody`);
       items = (r.value || []).filter((m) => m.parentFolderId !== known.deleteditems).map(toThreadMsg);
     }
     if (!items.some((m) => m.id === msg.id)) {
-      items.push(toThreadMsg(await call(`/me/messages/${msg.id}?$select=${LIST},uniqueBody`)));
+      items.push(toThreadMsg(await call(`${MB}/messages/${msg.id}?$select=${LIST},uniqueBody`)));
     }
     return items.sort((a, b) => new Date(a.date) - new Date(b.date));
   },
@@ -118,15 +131,15 @@ export const graph = {
   // One chat per person, built from recent received and sent mail.
   async chats(myEmail) {
     const [inbox, sent] = await Promise.all([
-      call(`/me/mailFolders/inbox/messages?$top=60&$orderby=receivedDateTime desc&$select=${LIST}`),
-      call(`/me/mailFolders/sentitems/messages?$top=60&$orderby=sentDateTime desc&$select=${LIST}`).catch(() => ({ value: [] })),
+      call(`${MB}/mailFolders/inbox/messages?$top=60&$orderby=receivedDateTime desc&$select=${LIST}`),
+      call(`${MB}/mailFolders/sentitems/messages?$top=60&$orderby=sentDateTime desc&$select=${LIST}`).catch(() => ({ value: [] })),
     ]);
     return groupChats([...(inbox.value || []), ...(sent.value || [])].map(mapMsg), myEmail);
   },
 
   // Every email with one person, oldest first, with readable bodies.
   async chat(email) {
-    const r = await call(`/me/messages?$search=${quote(`participants:${email}`)}&$top=40&$select=${LIST},uniqueBody`);
+    const r = await call(`${MB}/messages?$search=${quote(`participants:${email}`)}&$top=40&$select=${LIST},uniqueBody`);
     return (r.value || [])
       .filter((m) => m.parentFolderId !== known.deleteditems && !m.isDraft)
       .map(toThreadMsg)
@@ -134,11 +147,11 @@ export const graph = {
   },
 
   async fullBody(id) {
-    return bodyHtml((await call(`/me/messages/${id}?$select=body`)).body);
+    return bodyHtml((await call(`${MB}/messages/${id}?$select=body`)).body);
   },
 
   async attachments(id) {
-    const r = await call(`/me/messages/${id}/attachments?$select=id,name,contentType,size,isInline`);
+    const r = await call(`${MB}/messages/${id}/attachments?$select=id,name,contentType,size,isInline`);
     return (r.value || []).map((a) => ({ id: a.id, name: a.name || 'attachment', type: a.contentType || '', size: a.size || 0, inline: !!a.isInline }));
   },
 
@@ -148,7 +161,7 @@ export const graph = {
     const map = {};
     await Promise.all(imgs.map(async (a) => {
       try {
-        const f = await call(`/me/messages/${id}/attachments/${a.id}`);
+        const f = await call(`${MB}/messages/${id}/attachments/${a.id}`);
         if (f.contentId && f.contentBytes) map[f.contentId.replace(/^<|>$/g, '')] = `data:${f.contentType || a.type};base64,${f.contentBytes}`;
       } catch { /* skip this image */ }
     }));
@@ -156,24 +169,24 @@ export const graph = {
   },
 
   async attachmentBlob(msgId, attId) {
-    return (await call(`/me/messages/${msgId}/attachments/${attId}/$value`, { raw: true })).blob();
+    return (await call(`${MB}/messages/${msgId}/attachments/${attId}/$value`, { raw: true })).blob();
   },
 
   async markRead(id, isRead = true) {
-    await call(`/me/messages/${id}`, { method: 'PATCH', body: { isRead } });
+    await call(`${MB}/messages/${id}`, { method: 'PATCH', body: { isRead } });
   },
 
   // Creates a reply draft in Outlook (with the quoted original below) and puts our text on top.
   async createReplyDraft(messageId, { replyAll, html }) {
-    const draft = await call(`/me/messages/${messageId}/${replyAll ? 'createReplyAll' : 'createReply'}`, { method: 'POST', body: {} });
+    const draft = await call(`${MB}/messages/${messageId}/${replyAll ? 'createReplyAll' : 'createReply'}`, { method: 'POST', body: {} });
     const orig = draft.body?.contentType === 'text' ? textBodyToHtml(draft.body.content) : draft.body?.content || '';
     const content = /<body[^>]*>/i.test(orig) ? orig.replace(/<body[^>]*>/i, (m) => `${m}${html}`) : html + orig;
-    const updated = await call(`/me/messages/${draft.id}`, { method: 'PATCH', body: { body: { contentType: 'HTML', content } } });
+    const updated = await call(`${MB}/messages/${draft.id}`, { method: 'PATCH', body: { body: { contentType: 'HTML', content } } });
     return { id: draft.id, webLink: updated?.webLink || draft.webLink };
   },
 
   async createDraft({ to, subject, html }) {
-    const m = await call('/me/messages', {
+    const m = await call(`${MB}/messages`, {
       method: 'POST',
       body: { subject, body: { contentType: 'HTML', content: html }, toRecipients: to.map((p) => ({ emailAddress: { address: p.email, name: p.name || p.email } })) },
     });

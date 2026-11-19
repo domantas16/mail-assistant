@@ -226,5 +226,6 @@ export const ICON = {
   phone: svg('<path d="M5 3h4l2 5-2.5 1.5a11 11 0 0 0 6 6L16 13l5 2v4a2 2 0 0 1-2 2A17 17 0 0 1 3 5a2 2 0 0 1 2-2"/>'),
   building: svg('<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M9 22v-4h6v4M8 6h2M14 6h2M8 10h2M14 10h2M8 14h2M14 14h2"/>'),
   eye: svg('<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>'),
+  pin: svg('<path d="M12 17v5"/><path d="M8.5 3h7l-1 6.5 3 2.5v2h-11v-2l3-2.5z"/>'),
   unread: svg('<path d="M14 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-7"/><path d="m2 7 10 6 4.5-2.7"/><circle cx="19.5" cy="5.5" r="2.5" fill="currentColor"/>'),
 };

@@ -80,9 +80,23 @@ export function cannedDraft({ target, note, isNew }) {
   return isNew ? `Subject: [Subject from your note]\n\n${body}` : body;
 }
 
+export const DEMO_SHARED = 'info@optoman.example';
+const INFO = { name: 'OPTOMAN Info', email: DEMO_SHARED };
+
+function sharedSample() {
+  const tomas = p('Tomás Ruiz', 't.ruiz@laserworks.example', 'LaserWorks Iberia', 'Lab Manager');
+  const yuki = p('Yuki Tanaka', 'y.tanaka@kotobuki-optics.example', 'Kotobuki Optics', 'Buyer');
+  return [
+    msg('s1', tomas, [INFO], 3 * H, 'Catalogue request', para('Hello,', 'Could you send us your latest product catalogue? We are planning purchases for Q1.', 'Thanks,<br>Tomás'), { isRead: false }),
+    msg('s2', yuki, [INFO], 1.5 * D, 'HTS code for mirrors', para('Dear OPTOMAN,', 'For customs we need the HTS code and ECCN for your dielectric mirrors. Could you confirm?', 'Best regards,<br>Yuki Tanaka')),
+  ];
+}
+
 export function createDemo() {
-  const all = sample();
-  const drafts = [];
+  const boxes = { me: { all: sample(), drafts: [], self: ME }, [DEMO_SHARED]: { all: sharedSample(), drafts: [], self: INFO } };
+  let box = boxes.me;
+  let all = box.all;
+  let drafts = box.drafts;
   const byFolder = (f) => (f === 'drafts' ? drafts : all.filter((m) => m.folderId === f && !m.isDraft));
   const latestPerConv = (list) => list.slice().sort((a, b) => new Date(b.date) - new Date(a.date));
   const people = Object.values(PEOPLE).filter((x) => x !== PEOPLE.expo);
@@ -91,6 +105,19 @@ export function createDemo() {
 
   return {
     demo: true,
+    setMailbox(address) {
+      box = boxes[address] || boxes.me;
+      all = box.all;
+      drafts = box.drafts;
+    },
+    send(draftId) {
+      const i = drafts.findIndex((d) => d.id === draftId);
+      if (i >= 0) {
+        const [d] = drafts.splice(i, 1);
+        all.push({ ...d, id: `sent-${Date.now()}`, isDraft: false, folderId: 'sentitems', from: box.self, date: new Date().toISOString() });
+      }
+      return later();
+    },
     me: () => later({ ...ME, jobTitle: '' }),
     folders: () => later({
       main: [
@@ -99,7 +126,7 @@ export function createDemo() {
         { id: 'sentitems', key: 'sentitems', name: 'Sent', icon: 'send', unread: 0 },
         { id: 'archive', key: 'archive', name: 'Archive', icon: 'archive', unread: 0 },
       ],
-      other: [{ id: 'customers', name: 'Customers', icon: 'folder', unread: 0, child: true }],
+      other: box === boxes.me ? [{ id: 'customers', name: 'Customers', icon: 'folder', unread: 0, child: true }] : [],
     }),
     messages(folderId, { search } = {}) {
       let list;
@@ -117,14 +144,14 @@ export function createDemo() {
     markRead(id, isRead = true) { const m = all.find((x) => x.id === id); if (m) m.isRead = isRead; return later(); },
     createReplyDraft(id, { html }) {
       const src = all.find((m) => m.id === id);
-      drafts.unshift({ ...src, id: `draft-${Date.now()}`, from: ME, to: [src.from], subject: `RE: ${src.subject.replace(/^RE:\s*/i, '')}`, bodyHtml: html, preview: html.replace(/<[^>]+>/g, ' ').trim().slice(0, 140), isDraft: true, isRead: true, date: new Date().toISOString(), folderId: 'drafts', conversationId: `d${Date.now()}` });
+      drafts.unshift({ ...src, id: `draft-${Date.now()}`, from: box.self, to: [src.from], cc: [], subject: `RE: ${src.subject.replace(/^RE:\s*/i, '')}`, bodyHtml: html, preview: html.replace(/<[^>]+>/g, ' ').trim().slice(0, 140), isDraft: true, isRead: true, date: new Date().toISOString(), folderId: 'drafts', conversationId: src.conversationId });
       return later({ id: drafts[0].id, webLink: null });
     },
     createDraft({ to, subject, html }) {
-      drafts.unshift({ id: `draft-${Date.now()}`, conversationId: `d${Date.now()}`, from: ME, to, cc: [], subject: subject || '(no subject)', bodyHtml: html, preview: html.replace(/<[^>]+>/g, ' ').trim().slice(0, 140), isDraft: true, isRead: true, date: new Date().toISOString(), folderId: 'drafts', atts: [] });
+      drafts.unshift({ id: `draft-${Date.now()}`, conversationId: `d${Date.now()}`, from: box.self, to, cc: [], subject: subject || '(no subject)', bodyHtml: html, preview: html.replace(/<[^>]+>/g, ' ').trim().slice(0, 140), isDraft: true, isRead: true, date: new Date().toISOString(), folderId: 'drafts', atts: [] });
       return later({ id: drafts[0].id, webLink: null });
     },
-    chats: () => later(groupChats(all, ME.email)),
+    chats: () => later(groupChats(all, box.self.email)),
     chat: (email) => later(all.filter((m) => [m.from, ...m.to, ...m.cc].some((x) => x?.email === email)).sort((a, b) => new Date(a.date) - new Date(b.date))),
     people: (q = '') => later(q ? people.filter((x) => match(x, q)) : people),
     contacts: () => later(people.slice().sort((a, b) => a.name.localeCompare(b.name))),

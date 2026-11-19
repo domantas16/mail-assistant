@@ -4,6 +4,7 @@
 export const CONFIG = {
   clientId: '',
   tenantId: '',
-  // Delegated Microsoft Graph permissions. The app can only reach the signed-in user's own mailbox.
-  scopes: ['openid', 'profile', 'offline_access', 'User.Read', 'Mail.ReadWrite', 'Contacts.Read', 'People.Read'],
+  // Delegated Microsoft Graph permissions: the signed-in user's own mailbox, plus shared mailboxes
+  // that user already has access to in Exchange. The app can never reach more than the user can.
+  scopes: ['openid', 'profile', 'offline_access', 'User.Read', 'Mail.ReadWrite', 'Mail.Send', 'Mail.ReadWrite.Shared', 'Mail.Send.Shared', 'Contacts.Read', 'People.Read'],
 };
