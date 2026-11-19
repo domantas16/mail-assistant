@@ -472,7 +472,8 @@ function msgHtml(m, open) {
 }
 
 async function mountBody(m, opts = {}) {
-  const art = $(`.msg[data-mid="${CSS.escape(m.id)}"]`);
+  const sel = `.msg[data-mid="${CSS.escape(m.id)}"]`;
+  const art = $(`#overlay ${sel}`) || $(sel);
   if (!art) return;
   art.dataset.mounted = '1';
   const frame = $('iframe', art);
@@ -634,7 +635,7 @@ function replyPanel(target, st) {
         <button data-act="mode" data-mode="all" class="${st.mode === 'all' ? 'on' : ''}">Reply all</button>
       </div>
     </div>
-    <div class="draft ${st.text || st.busy ? '' : 'hidden'}">
+    <div class="draft ${st.text || st.busy ? '' : 'hidden'}"><button class="icon-btn draft-expand" data-act="draft-full" title="Full screen" aria-label="Open draft full screen">${ICON.expand}</button>
       <textarea id="draftText" class="draft-text" spellcheck="true" aria-label="Draft">${esc(st.text)}</textarea>
     </div>
     ${ai && st.text ? `<div class="chips">${Object.keys(QUICK).map((k) => `<button class="chip-btn" data-act="quick-revise" data-rev="${esc(k)}" ${st.busy ? 'disabled' : ''}>${esc(k)}</button>`).join('')}</div>` : picker}
@@ -957,7 +958,7 @@ function renderCompose() {
       <label class="field">To<input id="cTo" value="${esc(c.to)}" placeholder="Name or email. Start typing to search" autocomplete="off"></label>
       <div class="suggest" id="cSuggest"></div>
       <label class="field">Subject<input id="cSubject" value="${esc(c.subject)}" autocomplete="off"></label>
-      <div class="draft"><textarea id="draftText" class="draft-text" spellcheck="true" aria-label="Email text" placeholder="${aiMode() !== 'off' ? 'Write here, or describe the email below and Claude writes it.' : 'Write your email here.'}">${esc(c.text)}</textarea></div>
+      <div class="draft"><button class="icon-btn draft-expand" data-act="draft-full" title="Full screen" aria-label="Open draft full screen">${ICON.expand}</button><textarea id="draftText" class="draft-text" spellcheck="true" aria-label="Email text" placeholder="${aiMode() !== 'off' ? 'Write here, or describe the email below and Claude writes it.' : 'Write your email here.'}">${esc(c.text)}</textarea></div>
       ${aiMode() !== 'off' && c.text ? `<div class="chips">${Object.keys(QUICK).map((k) => `<button class="chip-btn" data-act="quick-revise" data-rev="${esc(k)}">${esc(k)}</button>`).join('')}</div>` : ''}
       ${sendBar(c, 'new')}
       ${c.meta ? `<div class="muted small meta">${esc(c.meta)}</div>` : ''}
@@ -1083,7 +1084,7 @@ function drawChat() {
     const sep = d !== day ? `<div class="chat-day">${esc(d)}</div>` : '';
     day = d;
     return `${sep}<div class="b-row ${out ? 'out' : 'in'}">
-      <div class="bubble">
+      <div class="bubble" data-act="read" data-id="${esc(m.id)}" role="button" tabindex="0" aria-label="Read full email">
         ${showSubj ? `<div class="b-subj">${esc(m.subject.replace(/^((re|fw|fwd|aw|sv):\s*)+/i, ''))}</div>` : ''}
         <div class="b-text">${esc(short || m.preview || '(empty message)')}</div>
         <div class="b-meta">${m.hasAttachments ? `<span class="b-att">${ICON.clip}</span>` : ''}${m.cc?.length ? `<span>+${m.cc.length} cc</span>` : ''}${m.scheduled ? `<span class="sched">${ICON.clock}Scheduled ${esc(fmtWhen(m.scheduled))}</span>` : `<button class="link" data-act="chat-open" data-id="${esc(m.id)}">Open email</button>`}<time title="${esc(fmtFull(m.date))}">${esc(new Date(m.date).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))}</time></div>
@@ -1106,6 +1107,73 @@ function drawChat() {
   body.scrollTop = body.scrollHeight;
   wireDraftArea();
   maybeAutoDraft();
+}
+
+// ---------- full screen: read one email, or edit the draft ----------
+function overlay(html) {
+  closeOverlay();
+  const el = document.createElement('div');
+  el.id = 'overlay';
+  el.className = 'overlay';
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-modal', 'true');
+  el.innerHTML = html;
+  document.body.appendChild(el);
+  document.body.classList.add('has-overlay');
+  history.pushState({ overlay: true }, '');
+  return el;
+}
+function closeOverlay(fromHistory = false) {
+  const el = $('#overlay');
+  if (!el) return;
+  el.remove();
+  document.body.classList.remove('has-overlay');
+  if (!fromHistory && history.state?.overlay) history.back();
+}
+// Phone back button closes the full-screen view instead of leaving the app.
+window.addEventListener('popstate', () => {
+  if ($('#fsDraft')) closeDraftFull(false, true);
+  else closeOverlay(true);
+});
+
+function openReader(m) {
+  const el = overlay(`
+    <div class="ov-head">
+      <button class="icon-btn" data-act="reader-close" aria-label="Close">${ICON.back}</button>
+      <h1>${esc(m.subject.replace(/^((re|fw|fwd|aw|sv):\s*)+/i, '') || '(no subject)')}</h1>
+      ${m.webLink ? `<a class="icon-btn" href="${esc(m.webLink)}" target="_blank" rel="noopener" title="Open in Outlook" aria-label="Open in Outlook">${ICON.ext}</a>` : ''}
+    </div>
+    <div class="ov-body">${msgHtml(m, true)}</div>`);
+  mountBody(m);
+  $('[data-act="reader-close"]', el).focus();
+}
+
+function openDraftFull() {
+  const isNew = S.view === 'compose';
+  const st = isNew ? S.compose : replyState();
+  st.text = $('#draftText')?.value ?? st.text;
+  const to = isNew ? (st.to || '').replace(/,\s*$/, '') : (replyTarget().from?.name || '');
+  const el = overlay(`
+    <div class="ov-head">
+      <button class="icon-btn" data-act="fs-done" aria-label="Done">${ICON.back}</button>
+      <h1>${isNew ? 'New email' : 'Reply'}<small>${esc(to ? `to ${to}` : '')}</small></h1>
+    </div>
+    <textarea id="fsDraft" class="fs-draft" spellcheck="true" aria-label="Draft">${esc(st.text)}</textarea>
+    <div class="ov-foot">
+      <button class="btn" data-act="fs-done">Done</button>
+      ${canSendHere() ? `<button class="btn primary" data-act="fs-send">${ICON.send}<span>Send</span></button>` : ''}
+    </div>`);
+  $('#fsDraft', el).focus();
+}
+
+function closeDraftFull(send, fromHistory = false) {
+  const isNew = S.view === 'compose';
+  const st = isNew ? S.compose : S.sel && replyState();
+  const v = $('#fsDraft')?.value;
+  if (st && v !== undefined) { st.text = v; st.bracketOk = false; }
+  closeOverlay(fromHistory);
+  rerenderPanel();
+  if (send) queueSend(isNew);
 }
 
 // ---------- contacts ----------
@@ -1384,6 +1452,14 @@ async function onClick(ev) {
       const p = S.chats?.find((x) => x.person.email === t.dataset.email)?.person || getPins().find((x) => x.email === t.dataset.email);
       return p && openChat(p);
     }
+    case 'read': {
+      const m = S.thread.find((x) => x.id === t.dataset.id);
+      return m && openReader(m);
+    }
+    case 'reader-close': return closeOverlay();
+    case 'draft-full': return openDraftFull();
+    case 'fs-done': return closeDraftFull(false);
+    case 'fs-send': return closeDraftFull(true);
     case 'chat-open': {
       const m = S.chat?.msgs?.find((x) => x.id === t.dataset.id);
       if (!m) return;
@@ -1599,12 +1675,16 @@ function onKey(ev) {
     if (el.value.trim()) runDraft(el.value.trim());
     return;
   }
+  if (ev.key === 'Escape' && $('#overlay')) {
+    if ($('#fsDraft')) return closeDraftFull(false);
+    return closeOverlay();
+  }
   if (ev.key === 'Escape' && $('.sched-menu')) {
     const st = S.view === 'compose' ? S.compose : replyState();
     st.schedOpen = false;
     rerenderPanel();
   }
-  if ((ev.key === 'Enter' || ev.key === ' ') && el.matches?.('.item[data-act]')) {
+  if ((ev.key === 'Enter' || ev.key === ' ') && el.matches?.('.item[data-act], .bubble[data-act]')) {
     ev.preventDefault();
     el.click();
   }
