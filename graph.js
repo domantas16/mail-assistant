@@ -1,6 +1,6 @@
 // Outlook access through Microsoft Graph, as the signed-in user.
-import { getAccessToken } from './auth.js';
-import { htmlToText, textBodyToHtml, groupChats } from './lib.js';
+import { getAccessToken } from './auth.js?v=20261119b';
+import { htmlToText, textBodyToHtml, groupChats } from './lib.js?v=20261119b';
 
 const BASE = 'https://graph.microsoft.com/v1.0';
 const LIST = 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,bodyPreview,isRead,isDraft,hasAttachments,conversationId,flag,importance,webLink,parentFolderId';

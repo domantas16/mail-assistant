@@ -1,5 +1,5 @@
 // Demo mode: fictional sample mailbox so the app can be tried before Microsoft 365 is connected.
-import { groupChats } from './lib.js';
+import { groupChats } from './lib.js?v=20261119b';
 
 const H = 3600e3, D = 24 * H;
 const ago = (ms) => new Date(Date.now() - ms).toISOString();

@@ -1,13 +1,13 @@
-import { CONFIG } from './config.js';
+import { CONFIG } from './config.js?v=20261119b';
 import {
   $, $$, esc, store, toast, debounce, avatar, fmtDate, fmtFull, fmtSize, textToHtml, htmlToText,
   cleanEmailHtml, srcdocFor, sanitizeBasic, copyRich, downloadBlob, grow, dayLabel, ICON,
-} from './lib.js';
-import * as auth from './auth.js';
-import { graph } from './graph.js';
-import { createDemo, cannedDraft, DEMO_SHARED } from './demo.js';
-import * as ai from './ai.js';
-import { DEFAULT_ANSWERS, GENERIC, parseAnswers, pickAnswer, fillAnswer, firstName } from './answers.js';
+} from './lib.js?v=20261119b';
+import * as auth from './auth.js?v=20261119b';
+import { graph } from './graph.js?v=20261119b';
+import { createDemo, cannedDraft, DEMO_SHARED } from './demo.js?v=20261119b';
+import * as ai from './ai.js?v=20261119b';
+import { DEFAULT_ANSWERS, GENERIC, parseAnswers, pickAnswer, fillAnswer, firstName } from './answers.js?v=20261119b';
 
 // ---------- settings & state ----------
 const DEFAULTS = {

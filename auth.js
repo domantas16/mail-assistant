@@ -1,7 +1,7 @@
 // Microsoft sign-in: OAuth 2.0 authorization code flow with PKCE for a single-page app.
 // No client secret is involved; tokens stay in this browser.
-import { CONFIG } from './config.js';
-import { store } from './lib.js';
+import { CONFIG } from './config.js?v=20261119b';
+import { store } from './lib.js?v=20261119b';
 
 const TOKENS = 'ma.tokens';
 const PKCE = 'ma.pkce';
