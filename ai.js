@@ -47,7 +47,7 @@ export function buildSystem({ me, style, notes, examples }) {
 
 const who = (p) => (p ? (p.name && p.name.toLowerCase() !== p.email ? `${p.name} <${p.email}>` : p.email) : '');
 
-export function replyPrompt({ thread, target, note }) {
+export function replyPrompt({ thread, target, note, standard }) {
   const blocks = [];
   let total = 0;
   for (const m of [...thread].reverse()) {
@@ -70,8 +70,37 @@ Write my reply to the latest message from ${who(target.from)}.
 
 <my_note>
 ${note || '(No note. Write a sensible reply based on the thread, with [placeholders] for anything I must fill in.)'}
-</my_note>`;
+</my_note>${standard ? `
+
+<my_standard_answer>
+${standard}
+</my_standard_answer>
+This is my usual answer to this kind of question. Follow its wording and links where it fits the email; drop what does not apply.` : ''}`;
 }
+
+// "My draft only" mode: Claude never sees the customer's email, only my note and my own text.
+export function noteReplyPrompt({ first, note, standard }) {
+  return `Write a reply email to ${first || 'a customer'}. You do not see their email; my note says what the reply should say.
+
+<my_note>
+${note}
+</my_note>${standard ? `
+
+<my_standard_answer>
+${standard}
+</my_standard_answer>
+Use it as the starting point where it fits.` : ''}`;
+}
+
+export const reviseDraftPrompt = (draft, instruction, isNew) => `Here is my email draft:
+
+<draft>
+${draft}
+</draft>
+
+Revise it: ${instruction}
+
+Return the complete revised email only${isNew ? ', starting with the "Subject: ..." line' : ''}. The same rules apply.`;
 
 export function newEmailPrompt({ to, note }) {
   return `Write a new email from me to ${to.length ? to.map(who).join(', ') : '(recipient not given)'}. Write it in English unless my note asks for another language.

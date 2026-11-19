@@ -6,36 +6,48 @@ A personal web app for reading Outlook (Microsoft 365) mail in a clean view and 
 
 ## What it does
 
-- **Chats** (the start screen): every email with one person in one messenger-style conversation, newest at the bottom. Pin important contacts to keep them at the top
-- **Shared mailboxes:** switch between your own mailbox and shared ones (e.g. info@) you can already open in Outlook
-- Inbox, folders and search, grouped by conversation
-- Readable threads: quoted history hidden, remote images blocked until you allow them
-- Contacts: the people you email most, plus saved Outlook contacts, with recent emails per person
-- **Reply with AI:** write a few words in any language, press *Draft reply*, then revise ("shorter", "more formal", or your own instruction)
-- **Send** the reply from the app (with a confirm step), save it to Outlook Drafts, or copy it (reply or reply all)
-- New emails drafted from a short note, with recipient suggestions
+- **Chats** (the start screen) or **Email**: switch at the top of the list. Chats puts every email with one person in one messenger-style conversation; pin important contacts to keep them at the top
+- **A reply is ready when an email opens.** Claude writes it (or prepares it in the background), or, with AI off, the best-fitting standard answer is filled in. Customer emails waiting for a reply are marked *Draft ready*
+- **Send or Schedule.** Send waits 5 seconds so it can be undone; Schedule sends tomorrow morning, Monday, or at a chosen time (Outlook's deferred delivery). Send warns if `[placeholders]` are left
+- Change the draft with one line in any language ("shorter", "10 vnt 450 EUR, 3 sav."), or quick buttons
+- **Shared mailboxes** (e.g. info@) you can already open in Outlook
+- Inbox, folders and search; readable threads with quoted history hidden and remote images blocked until allowed
+- Contacts: the people you email, plus saved Outlook contacts when allowed
+
+## Permissions and privacy
+
+The app starts **read-only** and asks only for what is switched on in Settings:
+
+| Feature | Microsoft Graph permissions (delegated) |
+| --- | --- |
+| Always | `User.Read`, `Mail.Read`, `offline_access` |
+| Send and schedule from the app | `Mail.ReadWrite`, `Mail.Send` |
+| Shared mailboxes | `Mail.Read.Shared` (with sending: `Mail.ReadWrite.Shared`, `Mail.Send.Shared`) |
+| Outlook contacts and people search | `Contacts.Read`, `People.Read` |
+
+Without sending, **Reply in Outlook** copies the draft and opens the email in Outlook.
+
+What Claude may see is a setting too:
+
+- **Off:** nothing leaves Microsoft and the browser; drafts come from the standard answers
+- **My draft only:** Claude sees your draft and instructions, never the customer's email
+- **Full:** Claude reads the thread and writes the reply
 
 ## How it works
 
 There is no server. The app is a set of static files hosted on GitHub Pages.
 
-- **Microsoft 365:** sign-in uses the OAuth 2.0 authorization code flow with PKCE for single-page apps. The app calls Microsoft Graph directly from the browser with delegated permissions, so it can only reach the signed-in user's own mailbox.
-- **Sending** goes through Microsoft Graph as you (or as the shared mailbox), after you confirm. Sent mail lands in Sent Items as usual.
-- **Claude:** when you press *Draft*, only that thread and your note go to the Anthropic API, using your own API key.
-- **Your data:** the API key, sign-in tokens, style guide, notes and signature are stored only in your browser (localStorage). Nothing is stored in this repository.
+- **Microsoft 365:** OAuth 2.0 authorization code flow with PKCE for single-page apps; Microsoft Graph is called from the browser with delegated permissions, so the app can only reach what the signed-in user can.
+- **Claude:** the Anthropic API is called with your own API key, only in the AI modes above.
+- **Your data:** the API key, sign-in tokens, settings, standard answers and prepared drafts are stored only in your browser (localStorage). Nothing is stored in this repository.
 - **Safe rendering:** email HTML is cleaned and shown in a sandboxed iframe with no scripts, under a strict Content Security Policy.
 
 ## Setup
 
-1. **IT registers the app** in Microsoft Entra ID:
-   - Supported account types: this organization only (single tenant)
-   - Platform: **Single-page application**, redirect URI `https://domantas16.github.io/mail-assistant/`
-   - Delegated Microsoft Graph permissions with admin consent: `User.Read`, `Mail.ReadWrite`, `Mail.Send`, `Mail.ReadWrite.Shared`, `Mail.Send.Shared`, `Contacts.Read`, `People.Read`, `offline_access`
-   - Shared mailboxes work only where the user already has Full Access (and Send As, for sending) in Exchange
-   - No client secret
-2. Open the app and paste the **Application (client) ID** and **Directory (tenant) ID**, then sign in.
-3. Add a Claude API key from the [Claude Console](https://platform.claude.com/settings/keys).
-4. In **Settings**, fill in your role, style guide, private notes, Outlook signature and any shared mailboxes.
+1. **IT registers the app** in Microsoft Entra ID: single tenant, platform **Single-page application**, redirect URI `https://domantas16.github.io/mail-assistant/`, the delegated permissions above (start with the first row), no client secret.
+2. Open the app, paste the **Application (client) ID** and **Directory (tenant) ID**, and sign in.
+3. Optional: add a Claude API key from the [Claude Console](https://platform.claude.com/settings/keys) and pick the AI mode.
+4. In **Settings**, adjust the standard answers, style guide and signature, and switch on any features IT approved.
 
 ## Files
 
@@ -46,6 +58,7 @@ There is no server. The app is a set of static files hosted on GitHub Pages.
 | `auth.js` | Microsoft sign-in (PKCE) |
 | `graph.js` | Outlook access via Microsoft Graph |
 | `ai.js` | Prompts and streaming drafts from Claude |
+| `answers.js` | Standard answers and keyword matching |
 | `demo.js` | Fictional sample mailbox for demo mode |
 | `lib.js` | Helpers: storage, formatting, safe email rendering, icons |
 | `config.js` | Optional built-in client and tenant IDs (not secret) |

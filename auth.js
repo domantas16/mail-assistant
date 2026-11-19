@@ -14,6 +14,24 @@ export function msConfig() {
   };
 }
 
+// Permissions asked for at sign-in: the read-only base plus the features switched on in Settings.
+export function requestedScopes() {
+  const s = store.get('settings', {});
+  const x = CONFIG.extraScopes;
+  const list = [...CONFIG.baseScopes];
+  if (s.accSend) list.push(...x.send);
+  if (s.accShared) list.push(...(s.accSend ? x.sharedSend : x.sharedRead));
+  if (s.accContacts) list.push(...x.contacts);
+  return [...new Set(list)];
+}
+
+// Permissions Microsoft actually granted, lower case without the Graph prefix, e.g. 'mail.read'.
+const norm = (scope) => String(scope || '').split(/\s+/).filter(Boolean).map((x) => x.replace(/^.*\//, '').toLowerCase());
+export function grantedScopes() {
+  const t = getTokens();
+  return new Set(t?.granted || norm((t?.scopes || []).join(' ')));
+}
+
 // The exact address IT registers as the SPA redirect URI, e.g. https://name.github.io/mail-assistant/
 export const redirectUri = () => new URL('.', location.href).href;
 
@@ -28,13 +46,14 @@ export async function login() {
   if (!clientId) throw new Error('Add the Application (client) ID from IT first.');
   const verifier = randomString(48);
   const state = randomString(16);
-  sessionStorage.setItem(PKCE, JSON.stringify({ verifier, state, clientId, tenantId }));
+  const scopes = requestedScopes();
+  sessionStorage.setItem(PKCE, JSON.stringify({ verifier, state, clientId, tenantId, scopes }));
   const params = new URLSearchParams({
     client_id: clientId,
     response_type: 'code',
     redirect_uri: redirectUri(),
     response_mode: 'fragment',
-    scope: CONFIG.scopes.join(' '),
+    scope: scopes.join(' '),
     state,
     code_challenge: b64url(await sha256(verifier)),
     code_challenge_method: 'S256',
@@ -64,7 +83,7 @@ export async function handleRedirect() {
     code: params.get('code'),
     redirect_uri: redirectUri(),
     code_verifier: saved.verifier,
-    scope: CONFIG.scopes.join(' '),
+    scope: (saved.scopes || requestedScopes()).join(' '),
   });
 }
 
@@ -95,6 +114,8 @@ async function tokenRequest(tenant, fields) {
     tenant,
     clientId: fields.client_id,
     account: prev?.account || null,
+    scopes: fields.scope.split(' '),
+    granted: data.scope ? norm(data.scope) : prev?.granted || null,
   };
   const claims = data.id_token && decodeJwt(data.id_token);
   if (claims) {
@@ -119,7 +140,7 @@ export async function getAccessToken() {
     client_id: t.clientId || msConfig().clientId,
     grant_type: 'refresh_token',
     refresh_token: t.refresh_token,
-    scope: CONFIG.scopes.join(' '),
+    scope: (t.scopes || CONFIG.baseScopes).join(' '),
   }).finally(() => { refreshing = null; });
   try {
     return (await refreshing).access_token;

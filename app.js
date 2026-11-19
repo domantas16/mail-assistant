@@ -7,12 +7,14 @@ import * as auth from './auth.js';
 import { graph } from './graph.js';
 import { createDemo, cannedDraft, DEMO_SHARED } from './demo.js';
 import * as ai from './ai.js';
+import { DEFAULT_ANSWERS, GENERIC, parseAnswers, pickAnswer, fillAnswer, firstName } from './answers.js';
 
 // ---------- settings & state ----------
 const DEFAULTS = {
   clientId: '', tenantId: '', apiKey: '', model: '', effort: 'low', myName: '', myRole: '',
   style: '', notes: '', useExamples: true, signatureHtml: '', addSignature: true,
   draftFont: 'Aptos, Calibri, Arial, sans-serif', loadImages: false, sharedMailboxes: '',
+  aiMode: 'full', autoDraft: true, answers: '', accSend: false, accShared: false, accContacts: false,
 };
 const cfg = () => ({ ...DEFAULTS, ...store.get('settings', {}) });
 const setCfg = (patch) => store.set('settings', { ...store.get('settings', {}), ...patch });
@@ -27,16 +29,41 @@ function resetState() {
     sel: null, thread: [], drafts: new Map(), compose: null,
     contactsTab: 'frequent', contacts: null, people: [], contactQ: '', contact: null, contactSeq: 0,
     examples: null,
-    chats: null, chat: null, chatQ: '', chatSeq: 0, mailbox: null,
+    chats: null, chat: null, chatQ: '', chatSeq: 0, mailbox: null, ready: new Map(), prepSeq: 0,
   });
 }
 resetState();
 const E = { app: $('#app'), side: $('#sidebar'), list: $('#listPane'), detail: $('#detailPane') };
 
+// ---------- what the app may do ----------
+// Live: decided by the permissions Microsoft granted at sign-in. Demo: everything, to show the full app.
+function can(f) {
+  if (S.mode === 'demo') return true;
+  const g = auth.grantedScopes();
+  return {
+    send: g.has('mail.send') && g.has('mail.readwrite'),
+    shared: g.has('mail.read.shared') || g.has('mail.readwrite.shared'),
+    sharedSend: g.has('mail.send.shared') && g.has('mail.readwrite.shared'),
+    people: g.has('people.read'),
+    contacts: g.has('contacts.read'),
+  }[f] || false;
+}
+const canSendHere = () => can('send') && (!S.mailbox || can('sharedSend'));
+const aiMode = () => cfg().aiMode || 'full';
+const answers = () => parseAnswers(cfg().answers || DEFAULT_ANSWERS);
+const BULK = /(^|[._-])(no-?reply|newsletter|news|events?|marketing|notifications?|mailer|info)@|@(mailchimp|hubspot|linkedin|.*\.mailer)/i;
+function isCustomer(p) {
+  const e = p?.email || '';
+  if (!e || e === myAddr() || BULK.test(e)) return false;
+  const dom = (x) => (x || '').split('@')[1] || '';
+  return dom(e) !== dom(S.me?.email) && dom(e) !== dom(S.mailbox);
+}
+
 // ---------- mailboxes: your own plus shared ones (info@, sales@ ...) ----------
 const EMAIL = /[^\s<>,;"]+@[^\s<>,;"]+\.[^\s<>,;"]+/g;
 function mailboxes() {
   if (S.mode === 'demo') return [DEMO_SHARED];
+  if (!can('shared')) return [];
   return [...new Set((cfg().sharedMailboxes.match(EMAIL) || []).map((x) => x.toLowerCase()))];
 }
 // The address that counts as "me" in the open mailbox (a shared mailbox sends as itself).
@@ -49,12 +76,16 @@ function restoreMailbox() {
 }
 
 async function switchMailbox(address) {
+  for (const st of [...S.drafts.values(), S.compose].filter(Boolean)) {
+    if (st.pending) { clearTimeout(st.pending.timer); toast('Sending cancelled because you switched mailbox.', 'err'); }
+  }
   const keep = { mode: S.mode, api: S.api, me: S.me, examples: S.examples };
   resetState();
   Object.assign(S, keep);
   S.mailbox = address || null;
   store.set('mailbox', S.mailbox);
   S.api.setMailbox(S.mailbox);
+  loadReady();
   E.app.classList.remove('show-detail');
   E.list.innerHTML = '';
   E.detail.innerHTML = loading(`Opening ${S.mailbox || 'your mailbox'}…`);
@@ -104,6 +135,7 @@ async function startLive(fresh) {
   }
   if (fresh) toast(`Signed in as ${S.me.email}`, 'ok');
   restoreMailbox();
+  loadReady();
   await loadFolders();
   S.folder = S.folders.main[0] || { id: 'inbox', name: 'Inbox', key: 'inbox' };
   openChats();
@@ -117,6 +149,7 @@ async function startDemo() {
   E.app.className = 'app';
   S.me = await S.api.me();
   restoreMailbox();
+  loadReady();
   await loadFolders();
   S.folder = S.folders.main[0];
   openChats();
@@ -154,12 +187,12 @@ function renderWelcome(err) {
   E.detail.innerHTML = `
   <div class="welcome-card">
     <div class="brand big">${ICON.logo}<span>Mail Assistant</span></div>
-    <p class="lead">Read your Outlook mail in a clean view, and turn a short note into a polished reply in your own style.</p>
+    <p class="lead">Your Outlook mail as chats, with a reply already drafted for each customer email. Check it and press Send.</p>
     ${err ? `<div class="alert err">${esc(friendlyAuthError(err))}</div>` : ''}
     <ol class="steps">
       <li class="step">
         <div class="step-h"><b>Connect Microsoft 365</b><span class="chip ${clientId ? 'ok' : 'wait'}">${clientId ? 'App IDs added' : 'Waiting for IT'}</span></div>
-        <p class="muted">IT registers the app once and sends you two IDs. Paste them here:</p>
+        <p class="muted">IT registers the app once and sends you two IDs. It starts read-only (User.Read, Mail.Read); sending and shared mailboxes can be switched on later. Paste the IDs here:</p>
         <div class="grid2">
           <label>Application (client) ID<input id="wClient" value="${esc(clientId)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" spellcheck="false" autocomplete="off"></label>
           <label>Directory (tenant) ID<input id="wTenant" value="${esc(tenantId)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" spellcheck="false" autocomplete="off"></label>
@@ -168,8 +201,8 @@ function renderWelcome(err) {
         <button class="btn primary" data-act="signin">${ICON.mail}<span>Sign in with Microsoft</span></button>
       </li>
       <li class="step">
-        <div class="step-h"><b>Add your Claude API key</b><span class="chip ${c.apiKey ? 'ok' : 'wait'}">${c.apiKey ? 'Key saved' : 'Not added yet'}</span></div>
-        <p class="muted">Create a key in the <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener">Claude Console</a> (API keys). It is stored only in this browser and sent only to Anthropic.</p>
+        <div class="step-h"><b>Add your Claude API key (optional)</b><span class="chip ${c.apiKey ? 'ok' : 'wait'}">${c.apiKey ? 'Key saved' : 'Not added yet'}</span></div>
+        <p class="muted">Create a key in the <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener">Claude Console</a> (API keys). It is stored only in this browser and sent only to Anthropic. Without it, drafts come from your standard answers.</p>
         <div class="row"><input id="wKey" type="password" placeholder="${c.apiKey ? 'Key saved. Paste a new one to replace it' : 'sk-ant-…'}" autocomplete="off" spellcheck="false"><button class="btn" data-act="save-key">Save key</button></div>
       </li>
     </ol>
@@ -220,14 +253,21 @@ function renderSidebar() {
     <button class="link small" data-act="${S.mode === 'demo' ? 'exit-demo' : 'signout'}">${S.mode === 'demo' ? 'Exit demo' : 'Sign out'}</button>`;
 }
 
+// Chats / Email switch at the top of the list. Chats is where the app starts.
+const viewSwitch = (on) => `<div class="view-seg" role="group" aria-label="View">
+    <button data-act="chats" class="${on === 'chats' ? 'on' : ''}" aria-pressed="${on === 'chats'}">${ICON.chat}<span>Chats</span></button>
+    <button data-act="email" class="${on === 'email' ? 'on' : ''}" aria-pressed="${on === 'email'}">${ICON.mail}<span>Email</span></button>
+  </div>`;
+
 function renderListShell() {
   E.list.innerHTML = `
     <div class="list-head">
       <button class="icon-btn only-mobile" data-act="menu" aria-label="Menu">${ICON.menu}</button>
-      <h2 id="listTitle">${esc(S.search ? 'Search results' : S.folder?.name || '')}</h2>
+      ${viewSwitch('email')}
       <button class="icon-btn" data-act="refresh" title="Refresh" aria-label="Refresh">${ICON.refresh}</button>
     </div>
     <label class="search">${ICON.search}<input id="q" type="search" placeholder="Search all mail" value="${esc(S.search)}" autocomplete="off"></label>
+    <div class="folder-line"><b id="listTitle">${esc(S.search ? 'Search results' : S.folder?.name || '')}</b></div>
     <div class="items" id="items"></div>`;
   renderItems();
 }
@@ -264,6 +304,7 @@ function itemHtml(m, outgoing) {
       <div class="item-top"><span class="from">${esc(who)}</span>${m.count > 1 ? `<span class="n">${m.count}</span>` : ''}<time>${esc(fmtDate(m.date))}</time></div>
       <div class="subj">${m.important ? '<span class="imp">!</span>' : ''}${m.isDraft ? '<span class="tag">Draft</span>' : ''}${esc(m.subject)}</div>
       <div class="prev">${esc(m.preview)}</div>
+      ${!outgoing && S.chats?.find((c) => c.person.email === m.from?.email)?.last?.id === m.id && hasReadyTag(m) ? READY_TAG : ''}
     </div>
     <div class="item-icons">${m.anyUnread ? '<span class="dot"></span>' : ''}${m.hasAttachments ? ICON.clip : ''}${m.flagged ? `<span class="flagged">${ICON.flag}</span>` : ''}</div>
   </div>`;
@@ -351,7 +392,7 @@ async function refreshList(silent = false) {
 
 // ---------- reading ----------
 function renderEmptyDetail() {
-  E.detail.innerHTML = empty(ICON.mail, 'Pick an email to read', 'Then write a few words about what you want to say and press <b>Draft reply</b>.');
+  E.detail.innerHTML = empty(ICON.mail, 'Pick an email to read', 'Customer emails open with a reply already drafted. Check it and press <b>Send</b>.');
 }
 
 async function openMessage(m) {
@@ -373,7 +414,7 @@ async function openMessage(m) {
         const li = S.list.find((y) => y.id === x.id);
         if (li) li.isRead = true;
         bumpUnread(x.folderId, -1);
-        S.api.markRead(x.id, true).catch(() => {});
+        if (can('send')) S.api.markRead(x.id, true).catch(() => {});
       }
       renderItems();
     }
@@ -395,9 +436,9 @@ function renderThread() {
       <button class="icon-btn only-mobile" data-act="back" aria-label="Back">${ICON.back}</button>
       <h1>${esc(t.at(-1)?.subject?.replace(/^(re|fw|fwd|aw|sv):\s*/i, '') || S.sel.subject)}</h1>
       <div class="thread-actions">
-        <button class="btn subtle" data-act="focus-reply">${ICON.spark}<span>Reply with AI</span></button>
+        <button class="btn subtle" data-act="focus-reply">${ICON.spark}<span>Reply</span></button>
         ${S.sel.webLink ? `<a class="icon-btn" href="${esc(S.sel.webLink)}" target="_blank" rel="noopener" title="Open in Outlook" aria-label="Open in Outlook">${ICON.ext}</a>` : ''}
-        <button class="icon-btn" data-act="mark-unread" title="Mark as unread" aria-label="Mark as unread">${ICON.unread}</button>
+        ${can('send') ? '' : '<!--'}<button class="icon-btn" data-act="mark-unread" title="Mark as unread" aria-label="Mark as unread">${ICON.unread}</button>${can('send') ? '' : '-->'}
       </div>
     </div>
     <div class="msgs">${t.map((m, i) => msgHtml(m, open(m, i))).join('')}</div>
@@ -405,6 +446,7 @@ function renderThread() {
   </div>`;
   t.forEach((m, i) => { if (open(m, i)) mountBody(m); });
   wireDraftArea();
+  maybeAutoDraft();
 }
 
 function msgHtml(m, open) {
@@ -483,11 +525,38 @@ async function renderAtts(m, art) {
   } catch { /* no attachments shown */ }
 }
 
-// ---------- AI reply ----------
+// ---------- reply: a draft is ready when the email opens ----------
+const READY_TAG = `<span class="ready-tag">${ICON.spark}Draft ready</span>`;
+
 function replyTarget() {
   const real = S.thread.filter((m) => !m.isDraft);
   const others = real.filter((m) => m.from?.email && m.from.email !== myAddr());
   return others.at(-1) || real.at(-1) || S.sel;
+}
+
+// Already answered when one of my messages came after theirs.
+function answered(t) {
+  return S.thread.some((m) => !m.isDraft && m.from?.email === myAddr() && new Date(m.date) > new Date(t.date));
+}
+
+const aiAuto = () => aiMode() === 'full' && cfg().apiKey && cfg().autoDraft;
+const latestText = (t) => (t.text ??= htmlToText((t.bodyHtml || '').replace(/<blockquote[\s\S]*?<\/blockquote>/gi, ''))) || t.preview || '';
+
+// The draft waiting for an email: Claude's (if prepared), otherwise the best standard answer.
+function readyFor(t) {
+  if (!t || !isCustomer(t.from)) return null;
+  const done = S.ready.get(t.id);
+  if (done) return { text: done.text, source: 'ai', meta: done.meta || '' };
+  if (aiAuto()) return null; // Claude writes it when the chat opens
+  const a = pickAnswer(answers(), { subject: t.subject, text: latestText(t) });
+  return { text: fillAnswer(a || GENERIC, t.from), source: 'standard', answer: (a || GENERIC).name };
+}
+
+// List badge: a prepared Claude draft, or a standard answer that fits.
+function hasReadyTag(m) {
+  if (!m || m.out || !isCustomer(m.from)) return false;
+  if (S.ready.has(m.id)) return true;
+  return !aiAuto() && !!pickAnswer(answers(), { subject: m.subject, text: m.preview || '' });
 }
 
 function replyState() {
@@ -495,7 +564,10 @@ function replyState() {
   if (!S.drafts.has(key)) {
     const t = replyTarget();
     const others = [...t.to, ...t.cc].filter((x) => x.email && x.email !== myAddr() && x.email !== t.from?.email);
-    S.drafts.set(key, { note: '', text: '', history: null, mode: others.length ? 'all' : 'reply', busy: false, saved: null, meta: '' });
+    const st = { note: '', text: '', history: null, mode: others.length ? 'all' : 'reply', busy: false, meta: '', source: '', targetId: t.id };
+    const r = answered(t) ? null : readyFor(t);
+    if (r) Object.assign(st, r);
+    S.drafts.set(key, st);
   }
   return S.drafts.get(key);
 }
@@ -507,39 +579,68 @@ const QUICK = {
   'Fix grammar only': 'Only fix grammar, spelling and flow. Keep the content and length.',
 };
 
-function draftTools(st, saveAct, sendAct) {
-  return `
-    <div class="draft ${st.text || st.busy ? '' : 'hidden'}">
-      ${st.subjectField || ''}
-      <textarea id="draftText" class="draft-text" spellcheck="true" aria-label="Draft">${esc(st.text)}</textarea>
-      <div class="as-row wrap">
-        <button class="btn" data-act="copy-draft">${ICON.copy}<span>Copy</span></button>
-        <button class="btn" data-act="${saveAct}">${ICON.draft}<span>Save to drafts</span></button>
-        <button class="btn ${st.confirmSend ? 'danger' : 'primary'}" data-act="${sendAct}">${ICON.send}<span>${st.confirmSend ? esc(st.confirmLabel) : 'Send'}</span></button>
-        ${st.saved ? `<span class="saved">${S.mode === 'demo' ? 'Saved (demo)' : 'Saved to Drafts'}</span>${st.saved.webLink ? `<a class="btn subtle" href="${esc(st.saved.webLink)}" target="_blank" rel="noopener">${ICON.ext}<span>Open in Outlook</span></a>` : ''}` : ''}
-        <span class="muted small meta">${esc(st.meta)}</span>
-      </div>
-      <div class="revise"><input id="revise" placeholder="Change something… e.g. “add that partial delivery is possible”" autocomplete="off"><button class="btn" data-act="revise">Revise</button></div>
-      <div class="chips">${Object.keys(QUICK).map((k) => `<button class="chip-btn" data-act="quick-revise" data-rev="${esc(k)}">${esc(k)}</button>`).join('')}</div>
-    </div>`;
+function schedOptions() {
+  const now = new Date();
+  const at = (days, h) => { const d = new Date(now); d.setDate(d.getDate() + days); d.setHours(h, 0, 0, 0); return d; };
+  const mon = at(((8 - now.getDay()) % 7) || 7, 8);
+  const list = [['Tomorrow morning', at(1, 8)], ['Tomorrow afternoon', at(1, 13)], ['Monday morning', mon]];
+  if (now.getHours() < 12) list.unshift(['This afternoon', at(0, 14)]);
+  const seen = new Set();
+  return list.filter(([, d]) => !seen.has(+d) && seen.add(+d));
+}
+const fmtWhen = (d) => new Date(d).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+
+// Bottom bar: change the draft with Claude, then Schedule or Send (or Reply in Outlook when read-only).
+function sendBar(st, kind) {
+  const ai = aiMode() !== 'off';
+  const isNew = kind === 'new';
+  const change = ai
+    ? `<label class="change"><span class="sr">Change the draft</span><input id="revise" placeholder="${st.text ? 'Change something… any language' : isNew ? 'What is it about? A few words, any language' : 'What should the reply say? A few words, any language'}" autocomplete="off"><button class="ai-go" data-act="revise" aria-label="Write with AI" ${st.busy ? 'disabled' : ''}>${ICON.spark}</button></label>`
+    : '<span class="grow"></span>';
+  if (st.pending) {
+    return `<div class="as-bar">${change}<div class="pending" role="status"><span class="pending-bar"></span><span>${esc(st.pending.label)}</span><button class="btn" data-act="undo-send">Undo</button></div></div>`;
+  }
+  if (!canSendHere()) {
+    return `<div class="as-bar">${change}<button class="btn primary" data-act="${isNew ? 'outlook-new' : 'outlook-reply'}">${ICON.ext}<span>${isNew ? 'Copy & open Outlook' : 'Reply in Outlook'}</span></button></div>`;
+  }
+  const menu = st.schedOpen ? `<div class="sched-menu" role="menu" aria-label="Schedule send">
+      <div class="sched-h">Send later</div>
+      ${schedOptions().map(([l, d]) => `<button role="menuitem" data-act="schedule" data-at="${d.toISOString()}"><span>${esc(l)}</span><small>${esc(fmtWhen(d))}</small></button>`).join('')}
+      <div class="sched-pick"><input type="datetime-local" id="schedAt" aria-label="Date and time"><button class="btn" data-act="schedule-pick">Schedule</button></div>
+    </div>` : '';
+  return `<div class="as-bar">${change}
+    <div class="sched-wrap"><button class="btn" data-act="sched-menu" aria-haspopup="menu" aria-expanded="${!!st.schedOpen}">${ICON.clock}<span>Schedule</span>${ICON.chevron}</button>${menu}</div>
+    <button class="btn primary" data-act="${isNew ? 'send-new' : 'send-reply'}">${ICON.send}<span>Send</span></button>
+  </div>`;
+}
+
+function draftLabel(st) {
+  if (st.busy) return 'Writing a draft…';
+  if (!st.text) return 'Write a reply';
+  if (st.source === 'ai') return 'Draft ready';
+  if (st.source === 'standard') return st.answer === GENERIC.name ? 'Draft · general reply' : `Draft ready · standard answer: ${st.answer}`;
+  return 'Your draft';
 }
 
 function replyPanel(target, st) {
   const name = target.from?.name || target.from?.email || '';
-  return `<section class="assistant ${st.busy ? 'busy' : ''}" id="assistant">
+  const ai = aiMode() !== 'off';
+  const picker = !ai ? `<label class="pick-answer">Standard answer<select id="answerSel"><option value="">Choose…</option>${[...answers(), GENERIC].map((a) => `<option ${a.name === st.answer ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label>` : '';
+  return `<section class="assistant ${st.busy ? 'busy' : ''} ${st.text ? 'has-draft' : ''}" id="assistant">
     <div class="as-head">
-      <div class="as-title">${ICON.spark}<b>Reply with AI</b><span class="muted small">to ${esc(name)}${st.mode === 'all' ? ' and others' : ''}${S.mailbox ? `, from ${esc(S.mailbox)}` : ''}</span></div>
+      <div class="as-title">${ICON.spark}<b>${esc(draftLabel(st))}</b><span class="muted small">to ${esc(name)}${st.mode === 'all' ? ' and others' : ''}${S.mailbox ? `, from ${esc(S.mailbox)}` : ''}</span></div>
       <div class="seg" role="group" aria-label="Reply type">
         <button data-act="mode" data-mode="reply" class="${st.mode === 'reply' ? 'on' : ''}">Reply</button>
         <button data-act="mode" data-mode="all" class="${st.mode === 'all' ? 'on' : ''}">Reply all</button>
       </div>
     </div>
-    <textarea id="note" rows="3" placeholder="What should the reply say? A few words in any language, e.g. “10 pcs 450 EUR each, 3 weeks, offer 5% for 20 pcs”">${esc(st.note)}</textarea>
-    <div class="as-row">
-      <button class="btn ai" data-act="draft" ${st.busy ? 'disabled' : ''}>${ICON.spark}<span>${st.busy ? 'Writing…' : st.text ? 'Draft again' : 'Draft reply'}</span></button>
-      <span class="muted small">Ctrl + Enter</span>
+    <div class="draft ${st.text || st.busy ? '' : 'hidden'}">
+      <textarea id="draftText" class="draft-text" spellcheck="true" aria-label="Draft">${esc(st.text)}</textarea>
     </div>
-    ${draftTools(st, 'save-draft', 'send-reply')}
+    ${ai && st.text ? `<div class="chips">${Object.keys(QUICK).map((k) => `<button class="chip-btn" data-act="quick-revise" data-rev="${esc(k)}" ${st.busy ? 'disabled' : ''}>${esc(k)}</button>`).join('')}</div>` : picker}
+    ${sendBar(st, 'reply')}
+    ${st.meta ? `<div class="muted small meta">${esc(st.meta)}</div>` : ''}
+    ${!canSendHere() ? '<p class="muted small ro-note">Read-only access: <b>Reply in Outlook</b> copies the draft and opens the email in Outlook. Click Reply there and paste.</p>' : ''}
   </section>`;
 }
 
@@ -547,14 +648,24 @@ function rerenderPanel() {
   if (S.view === 'compose') return renderCompose();
   const box = $('#assistant');
   if (!box || !S.sel) return;
-  const keepNote = $('#note')?.value;
+  const keep = $('#revise')?.value;
   box.outerHTML = replyPanel(replyTarget(), replyState());
-  if (keepNote !== undefined && !replyState().busy) $('#note').value = keepNote;
+  if (keep && $('#revise')) $('#revise').value = keep;
   wireDraftArea();
 }
 
 function wireDraftArea() {
-  ['#note', '#draftText', '#cNote'].forEach((s) => grow($(s)));
+  ['#draftText'].forEach((s) => grow($(s)));
+}
+
+// Claude writes the reply as soon as a customer email opens (Full mode with automatic drafts).
+function maybeAutoDraft() {
+  if (!S.sel || !$('#assistant')) return;
+  const st = replyState();
+  const t = replyTarget();
+  if (st.text || st.busy || st.autoTried || answered(t) || !isCustomer(t.from) || !aiAuto()) return;
+  st.autoTried = true;
+  runDraft('', { auto: true });
 }
 
 function meForAI() {
@@ -591,37 +702,62 @@ function parseRecipients(s) {
   }).filter(Boolean);
 }
 
-async function runDraft(revision) {
+// Prepared Claude drafts are kept in this browser so they aren't paid for twice.
+const readyKey = () => `ready:${S.mailbox || 'me'}`;
+function loadReady() {
+  S.ready = new Map(Object.entries(store.get(readyKey(), {})));
+}
+function saveReady(id, v) {
+  S.ready.set(id, { ...v, at: Date.now() });
+  store.set(readyKey(), Object.fromEntries([...S.ready.entries()].sort((a, b) => b[1].at - a[1].at).slice(0, 40)));
+}
+
+// One instruction box does everything: with no draft it writes one from the note, otherwise it revises.
+async function runDraft(input, { auto = false } = {}) {
   const isNew = S.view === 'compose';
   const st = isNew ? S.compose : replyState();
   if (!st || st.busy) return;
+  const mode = aiMode();
+  if (mode === 'off') { toast('AI drafting is off. You can switch it on in Settings.'); return; }
   const c = cfg();
-  const noteEl = $(isNew ? '#cNote' : '#note');
-  if (noteEl) st.note = noteEl.value.trim();
+  const v = (input ?? $('#revise')?.value ?? '').trim();
   if (isNew) {
-    st.to = $('#cTo')?.value || st.to;
+    st.to = $('#cTo')?.value ?? st.to;
     st.subject = $('#cSubject')?.value ?? st.subject;
-    if (!st.note && !revision) return toast('Write a few words about what the email should say.', 'err');
   }
-  const current = $('#draftText')?.value.trim() || st.text;
+  const current = ($('#draftText')?.value ?? st.text).trim();
   const target = isNew ? null : replyTarget();
+  if (!auto && !v && !(mode === 'full' && !isNew && !current)) return $('#revise')?.focus();
 
   if (!c.apiKey) {
     if (S.mode === 'demo') {
-      const text = cannedDraft({ target, note: st.note, isNew });
-      if (isNew) {
-        const s = ai.splitSubject(text);
-        st.subject = s.subject || st.subject;
-        st.text = s.body;
-      } else {
-        st.text = text;
-      }
-      st.meta = 'Sample draft (no API key in demo)';
-      st.saved = null;
+      const text = current && v ? `${current}\n\n[Demo: Claude would apply “${v}” here.]` : cannedDraft({ target, note: v, isNew });
+      if (isNew && !current) { const sp = ai.splitSubject(text); st.subject = sp.subject || st.subject; st.text = sp.body; } else st.text = text;
+      st.meta = 'Sample text (demo has no Claude key)';
+      st.source = 'ai';
       return rerenderPanel();
     }
     toast('Add your Claude API key in Settings first.', 'err');
     return openSettings('ai');
+  }
+
+  const standard = !isNew ? (pickAnswer(answers(), { subject: target.subject, text: latestText(target) })) : null;
+  let messages;
+  if (current && v) {
+    if (mode === 'full' && !isNew) {
+      const thread = S.thread.filter((m) => !m.isDraft).map((m) => ({ ...m, text: latestText(m) }));
+      messages = [{ role: 'user', content: ai.replyPrompt({ thread, target, note: st.note }) }, { role: 'assistant', content: current }, { role: 'user', content: ai.revisePrompt(v, false) }];
+    } else {
+      messages = [{ role: 'user', content: ai.reviseDraftPrompt(isNew ? `Subject: ${st.subject}\n\n${current}` : current, v, isNew) }];
+    }
+  } else if (isNew) {
+    messages = [{ role: 'user', content: ai.newEmailPrompt({ to: parseRecipients(st.to), note: v }) }];
+  } else if (mode === 'full') {
+    st.note = v;
+    const thread = S.thread.filter((m) => !m.isDraft).map((m) => ({ ...m, text: latestText(m) }));
+    messages = [{ role: 'user', content: ai.replyPrompt({ thread, target, note: v, standard: standard ? fillAnswer(standard, target.from) : '' }) }];
+  } else {
+    messages = [{ role: 'user', content: ai.noteReplyPrompt({ first: firstName(target.from), note: v, standard: standard ? fillAnswer(standard, target.from) : '' }) }];
   }
 
   st.busy = true;
@@ -629,47 +765,72 @@ async function runDraft(revision) {
   const t0 = performance.now();
   try {
     const model = await chooseModel(c);
-    const system = ai.buildSystem({ me: meForAI(), style: c.style || ai.DEFAULT_STYLE, notes: c.notes, examples: c.useExamples ? await examples() : [] });
-    let messages;
-    if (revision && st.history) {
-      const prev = isNew ? `Subject: ${st.subject}\n\n${current}` : current;
-      messages = [...st.history, { role: 'assistant', content: prev }, { role: 'user', content: ai.revisePrompt(revision, isNew) }];
-    } else if (isNew) {
-      messages = [{ role: 'user', content: ai.newEmailPrompt({ to: parseRecipients(st.to), note: st.note }) }];
-    } else {
-      const thread = S.thread.filter((m) => !m.isDraft).map((m) => ({ ...m, text: (m.text ??= htmlToText(m.bodyHtml)) }));
-      messages = [{ role: 'user', content: ai.replyPrompt({ thread, target, note: st.note }) }];
-    }
+    const system = ai.buildSystem({ me: meForAI(), style: c.style || ai.DEFAULT_STYLE, notes: c.notes, examples: c.useExamples && mode === 'full' ? await examples() : [] });
     const out = await ai.draft({
       key: c.apiKey, model, effort: c.effort, system, messages,
       onText: (t) => {
         const area = $('#draftText');
         if (area && (isNew ? S.view === 'compose' && S.compose === st : S.sel && replyState() === st)) {
-          const first = !area.dataset.streaming;
-          area.dataset.streaming = '1';
           area.closest('.draft')?.classList.remove('hidden');
           area.value = t;
           grow(area);
-          if (first) area.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
       },
     });
-    if (isNew) {
+    if (isNew && !current) {
+      const { subject, body } = ai.splitSubject(out.text);
+      st.subject = subject || st.subject;
+      st.text = body;
+    } else if (isNew) {
       const { subject, body } = ai.splitSubject(out.text);
       st.subject = subject || st.subject;
       st.text = body;
     } else {
       st.text = out.text;
     }
-    st.history = messages;
-    st.saved = null;
+    st.source = 'ai';
     st.meta = `${ai.prettyModel(model)} · ${((performance.now() - t0) / 1000).toFixed(1)} s`;
+    if (!isNew) saveReady(target.id, { text: st.text, meta: st.meta });
+    const inp = $('#revise');
+    if (inp) inp.value = '';
   } catch (e) {
     fail(e);
   } finally {
     st.busy = false;
     const visible = isNew ? S.view === 'compose' && S.compose === st : (S.view === 'mail' || S.view === 'chats') && S.sel && replyState() === st;
-    if (visible) rerenderPanel();
+    if (visible) { rerenderPanel(); if (!isNew) $('#revise') && ($('#revise').value = ''); }
+    if (!isNew && S.view === 'chats') renderChatItems();
+  }
+}
+
+// Background: Claude prepares replies for the newest unanswered customer chats (Full mode only).
+async function prepareDrafts() {
+  if (!aiAuto() || !S.chats) return;
+  const seq = ++S.prepSeq;
+  const c = cfg();
+  const todo = S.chats
+    .filter((x) => x.last && !x.last.out && isCustomer(x.last.from) && !S.ready.has(x.last.id) && Date.now() - new Date(x.last.date) < 14 * 864e5)
+    .slice(0, 4);
+  for (const chat of todo) {
+    if (seq !== S.prepSeq || S.chat?.person.email === chat.person.email) continue;
+    try {
+      const msgs = await S.api.chat(chat.person.email);
+      const target = msgs.filter((m) => m.from?.email !== myAddr()).at(-1);
+      if (!target || msgs.at(-1)?.from?.email === myAddr() || S.ready.has(target.id)) continue;
+      const thread = msgs.map((m) => ({ ...m, text: latestText(m) }));
+      const standard = pickAnswer(answers(), { subject: target.subject, text: latestText(target) });
+      const model = await chooseModel(c);
+      const out = await ai.draft({
+        key: c.apiKey, model, effort: c.effort,
+        system: ai.buildSystem({ me: meForAI(), style: c.style || ai.DEFAULT_STYLE, notes: c.notes, examples: c.useExamples ? await examples() : [] }),
+        messages: [{ role: 'user', content: ai.replyPrompt({ thread, target, note: '', standard: standard ? fillAnswer(standard, target.from) : '' }) }],
+      });
+      if (seq !== S.prepSeq) return;
+      saveReady(target.id, { text: out.text, meta: `${ai.prettyModel(model)} · prepared` });
+      if (S.view === 'chats') renderChatItems();
+    } catch (e) {
+      if (e.status === 401) return fail(e);
+    }
   }
 }
 
@@ -677,124 +838,129 @@ function signatureHtml(c) {
   return c.addSignature && c.signatureHtml ? `<div>${sanitizeBasic(c.signatureHtml)}</div>` : '';
 }
 
-async function saveReplyDraft(btn) {
-  const st = replyState();
-  const text = $('#draftText')?.value.trim();
-  if (!text) return toast('Nothing to save yet.');
-  st.text = text;
-  const c = cfg();
-  btn.disabled = true;
-  btn.lastChild.textContent = 'Saving…';
-  try {
-    const html = textToHtml(text, c.draftFont) + signatureHtml(c);
-    st.saved = await S.api.createReplyDraft(replyTarget().id, { replyAll: st.mode === 'all', html });
-    st.savedKey = `${st.mode}|${text}`;
-    toast(S.mode === 'demo' ? 'Demo mode: saved to the sample Drafts folder.' : 'Saved to your Outlook Drafts. Review and send it from Outlook.', 'ok', 5000);
-  } catch (e) {
-    fail(e);
-  }
-  rerenderPanel();
-}
-
-async function copyDraft() {
-  const text = $('#draftText')?.value.trim();
-  if (!text) return;
-  const ok = await copyRich(text, textToHtml(text, cfg().draftFont));
-  toast(ok ? 'Copied. Paste it into your Outlook reply.' : 'Copy failed. Select the text and press Ctrl+C.', ok ? 'ok' : 'err');
-}
-
-// ---------- sending ----------
-// First click arms the button ("Confirm: send to …"); a second click within 6 s sends.
-async function sendDraft(btn, isNew) {
+// ---------- sending: Send waits 5 seconds so it can be undone ----------
+function queueSend(isNew, at = null) {
   const st = isNew ? S.compose : replyState();
   const text = $('#draftText')?.value.trim();
   if (!text) return toast('Nothing to send yet.');
+  if (/\[[^\]\n]{2,60}\]/.test(text) && !st.bracketOk) {
+    st.bracketOk = true;
+    return toast('The draft still has [placeholders]. Fill them in, or press again to send anyway.', 'err', 6000);
+  }
   st.text = text;
+  st.schedOpen = false;
+  if (at && new Date(at) < Date.now() + 60e3) return toast('Pick a time in the future.', 'err');
   const c = cfg();
-  let to = [];
+  const ctx = { st, isNew, at, text, html: textToHtml(text, c.draftFont) + signatureHtml(c), mailbox: S.mailbox };
+  let who;
   if (isNew) {
     st.to = $('#cTo').value;
     st.subject = $('#cSubject').value.trim();
-    to = parseRecipients(st.to);
-    if (!to.length) return toast('Add at least one recipient email address.', 'err');
-    if (!st.subject) return toast('Add a subject first.', 'err');
+    ctx.to = parseRecipients(st.to);
+    ctx.subject = st.subject;
+    if (!ctx.to.length) return toast('Add at least one recipient email address.', 'err');
+    if (!ctx.subject) return toast('Add a subject first.', 'err');
+    who = ctx.to.map((x) => x.name.split(' ')[0]).slice(0, 2).join(', ');
+  } else {
+    ctx.target = replyTarget();
+    ctx.replyAll = st.mode === 'all';
+    ctx.chatEmail = S.view === 'chats' ? S.chat?.person.email : null;
+    who = firstName(ctx.target.from) || ctx.target.from?.email;
   }
-  if (!st.confirmSend) {
-    const target = isNew ? null : replyTarget();
-    const names = isNew ? to.map((x) => x.name.split(' ')[0]) : [target.from?.name || target.from?.email];
-    const extra = isNew ? 0 : st.mode === 'all' ? [...target.to, ...target.cc].filter((x) => x.email && x.email !== myAddr() && x.email !== target.from?.email).length : 0;
-    st.confirmSend = true;
-    st.confirmLabel = `Confirm: send to ${names.slice(0, 2).join(', ')}${names.length > 2 || extra ? ` +${Math.max(names.length - 2, 0) + extra}` : ''}${c.addSignature && !c.signatureHtml ? ' (no signature set)' : ''}`;
-    rerenderPanel();
-    setTimeout(() => { if (st.confirmSend) { st.confirmSend = false; if ($('#assistant')) rerenderPanel(); } }, 6000);
+  st.pending = { label: at ? `Scheduling for ${fmtWhen(at)}…` : `Sending to ${who}…`, timer: setTimeout(() => doSend(ctx), 5000) };
+  rerenderPanel();
+}
+
+function undoSend() {
+  const st = S.view === 'compose' ? S.compose : S.sel && replyState();
+  if (!st?.pending) return;
+  clearTimeout(st.pending.timer);
+  st.pending = null;
+  rerenderPanel();
+  toast('Not sent', 'ok', 1500);
+}
+
+async function doSend(ctx) {
+  const { st } = ctx;
+  const here = () => (ctx.isNew ? S.view === 'compose' && S.compose === st : S.sel && S.drafts.get(S.sel.conversationId || S.sel.id) === st);
+  if (ctx.mailbox !== S.mailbox) { st.pending = null; return toast('Not sent: the mailbox changed.', 'err'); }
+  try {
+    const draft = ctx.isNew
+      ? await S.api.createDraft({ to: ctx.to, subject: ctx.subject, html: ctx.html })
+      : await S.api.createReplyDraft(ctx.target.id, { replyAll: ctx.replyAll, html: ctx.html });
+    await S.api.send(draft.id, { at: ctx.at });
+    toast(ctx.at ? `Scheduled for ${fmtWhen(ctx.at)}. It waits in your Outbox until then.` : `Sent${ctx.mailbox ? ` from ${ctx.mailbox}` : ''}`, 'ok', 4500);
+  } catch (e) {
+    st.pending = null;
+    fail(e);
+    if (here()) rerenderPanel();
     return;
   }
-  st.confirmSend = false;
-  btn.disabled = true;
-  btn.lastChild.textContent = 'Sending…';
-  const html = textToHtml(text, c.draftFont) + signatureHtml(c);
-  try {
-    const key = isNew ? `${st.to}|${st.subject}|${text}` : `${st.mode}|${text}`;
-    let draft = st.saved && st.savedKey === key ? st.saved : null;
-    if (!draft) {
-      draft = isNew
-        ? await S.api.createDraft({ to, subject: st.subject, html })
-        : await S.api.createReplyDraft(replyTarget().id, { replyAll: st.mode === 'all', html });
-    }
-    await S.api.send(draft.id);
-    toast(`Sent${S.mailbox ? ` from ${S.mailbox}` : ''}`, 'ok', 4000);
-  } catch (e) {
-    fail(e);
-    return rerenderPanel();
+  st.pending = null;
+  if (ctx.isNew) {
+    S.compose = { to: '', subject: '', note: '', text: '', busy: false, meta: '', history: null };
+    if (S.view === 'compose') renderCompose();
+    return;
   }
-  if (isNew) {
-    S.compose = { to: '', subject: '', note: '', text: '', busy: false, saved: null, meta: '', history: null };
-    return renderCompose();
-  }
-  // Show the sent reply straight away (Outlook's search index can take a minute to catch up).
-  const target = replyTarget();
+  // Show the reply straight away (Outlook's search index can take a minute to catch up).
+  const t = ctx.target;
   const sent = {
-    id: `sent-${Date.now()}`, conversationId: target.conversationId, from: { name: S.mailbox || S.me?.name || 'Me', email: myAddr() },
-    to: [target.from], cc: [], date: new Date().toISOString(), subject: `RE: ${target.subject.replace(/^re:\s*/i, '')}`,
-    bodyHtml: html, preview: text.slice(0, 140), isRead: true, isDraft: false, hasAttachments: false,
+    id: `sent-${Date.now()}`, conversationId: t.conversationId, from: { name: S.mailbox || S.me?.name || 'Me', email: myAddr() },
+    to: [t.from], cc: [], date: new Date().toISOString(), subject: `RE: ${t.subject.replace(/^re:\s*/i, '')}`,
+    bodyHtml: ctx.html, preview: ctx.text.slice(0, 140), isRead: true, isDraft: false, hasAttachments: false, scheduled: ctx.at || null,
   };
-  Object.assign(st, { note: '', text: '', history: null, saved: null, savedKey: null, meta: '' });
-  if (S.view === 'chats' && S.chat?.msgs) {
+  Object.assign(st, { note: '', text: '', history: null, meta: '', source: '', answer: '', autoTried: true, bracketOk: false });
+  S.ready.delete(t.id);
+  const entry = S.chats?.find((x) => x.person.email === (ctx.chatEmail || t.from?.email));
+  if (entry) entry.last = { ...sent, out: true };
+  if (S.view === 'chats' && S.chat?.msgs && S.chat.person.email === ctx.chatEmail) {
     S.chat.msgs.push(sent);
-    const entry = S.chats?.find((x) => x.person.email === S.chat.person.email);
-    if (entry) entry.last = { ...sent, out: true };
     drawChat();
-    renderChatItems();
-  } else {
+  } else if (S.view === 'mail' && here()) {
     S.thread.push(sent);
     renderThread();
   }
+  if (S.view === 'chats') renderChatItems();
+}
+
+// Read-only access: copy the draft, open the email in Outlook, paste into Outlook's reply.
+async function replyInOutlook(isNew) {
+  const text = $('#draftText')?.value.trim() || '';
+  const ok = text ? await copyRich(text, textToHtml(text, cfg().draftFont)) : true;
+  let url;
+  if (isNew) {
+    const to = parseRecipients($('#cTo')?.value).map((x) => x.email).join(',');
+    url = `https://outlook.office.com/mail/deeplink/compose?to=${encodeURIComponent(to)}&subject=${encodeURIComponent($('#cSubject')?.value || '')}`;
+  } else url = replyTarget().webLink;
+  if (url) window.open(url, '_blank', 'noopener');
+  toast(!url ? 'Copied. (Demo emails have no Outlook link.)' : ok ? (isNew ? 'Draft copied. Paste it into the new email in Outlook.' : 'Draft copied. In Outlook, click Reply and paste.') : 'Opened Outlook. Copy failed: select the draft and press Ctrl+C.', ok ? 'ok' : 'err', 6000);
 }
 
 // ---------- new email ----------
 function openCompose(prefill = {}) {
   S.view = 'compose';
-  S.compose = { to: prefill.to || '', subject: '', note: '', text: '', busy: false, saved: null, meta: '', history: null };
+  S.compose = { to: prefill.to || '', subject: '', note: '', text: '', busy: false, meta: '', history: null };
   renderSidebar();
   closeDrawer();
   E.app.classList.add('show-detail');
-  if (!$('#items')) renderListShell();
+  if (!$('#items') && !$('#chitems')) renderListShell();
   renderCompose();
-  $(prefill.to ? '#cNote' : '#cTo')?.focus();
+  $(prefill.to ? '#cSubject' : '#cTo')?.focus();
 }
 
 function renderCompose() {
   const c = S.compose;
-  const st = { ...c, subjectField: `<label class="field">Subject<input id="cSubject" value="${esc(c.subject)}" autocomplete="off"></label>` };
   E.detail.innerHTML = `
   <div class="thread compose">
     <div class="thread-head"><button class="icon-btn only-mobile" data-act="back" aria-label="Back">${ICON.back}</button><h1>New email</h1></div>
     <section class="assistant ${c.busy ? 'busy' : ''}" id="assistant">
-      <label class="field">To<input id="cTo" value="${esc(c.to)}" placeholder="Name or email. Start typing to search your contacts" autocomplete="off"></label>
+      <label class="field">To<input id="cTo" value="${esc(c.to)}" placeholder="Name or email. Start typing to search" autocomplete="off"></label>
       <div class="suggest" id="cSuggest"></div>
-      <label class="field">What's it about?<textarea id="cNote" rows="3" placeholder="A few words in any language, e.g. “follow up on the 1030 nm mirror quote, 5% off for 20 pcs”">${esc(c.note)}</textarea></label>
-      <div class="as-row"><button class="btn ai" data-act="draft" ${c.busy ? 'disabled' : ''}>${ICON.spark}<span>${c.busy ? 'Writing…' : c.text ? 'Draft again' : 'Draft email'}</span></button><span class="muted small">Ctrl + Enter</span></div>
-      ${draftTools(st, 'save-new', 'send-new')}
+      <label class="field">Subject<input id="cSubject" value="${esc(c.subject)}" autocomplete="off"></label>
+      <div class="draft"><textarea id="draftText" class="draft-text" spellcheck="true" aria-label="Email text" placeholder="${aiMode() !== 'off' ? 'Write here, or describe the email below and Claude writes it.' : 'Write your email here.'}">${esc(c.text)}</textarea></div>
+      ${aiMode() !== 'off' && c.text ? `<div class="chips">${Object.keys(QUICK).map((k) => `<button class="chip-btn" data-act="quick-revise" data-rev="${esc(k)}">${esc(k)}</button>`).join('')}</div>` : ''}
+      ${sendBar(c, 'new')}
+      ${c.meta ? `<div class="muted small meta">${esc(c.meta)}</div>` : ''}
     </section>
   </div>`;
   wireDraftArea();
@@ -806,31 +972,18 @@ const suggest = debounce(async (value) => {
   const token = value.split(/[,;]/).pop().trim();
   if (token.length < 2 || token.includes('@')) { box.innerHTML = ''; return; }
   try {
-    const people = (await S.api.people(token)).slice(0, 6);
+    const people = (await findPeople(token)).slice(0, 6);
     if (S.view !== 'compose') return;
     box.innerHTML = people.map((x) => `<button class="sugg" data-act="pick" data-name="${esc(x.name)}" data-email="${esc(x.email)}">${avatar(x, 24)}<span>${esc(x.name)}</span><small>${esc(x.email)}</small></button>`).join('');
   } catch { box.innerHTML = ''; }
 }, 300);
 
-async function saveNewDraft(btn) {
-  const c = S.compose;
-  c.to = $('#cTo').value;
-  c.subject = $('#cSubject').value.trim();
-  c.text = $('#draftText').value.trim();
-  const to = parseRecipients(c.to);
-  if (!to.length) return toast('Add at least one recipient email address.', 'err');
-  if (!c.text) return toast('Nothing to save yet.');
-  btn.disabled = true;
-  btn.lastChild.textContent = 'Saving…';
-  try {
-    const conf = cfg();
-    c.saved = await S.api.createDraft({ to, subject: c.subject, html: textToHtml(c.text, conf.draftFont) + signatureHtml(conf) });
-    c.savedKey = `${c.to}|${c.subject}|${c.text}`;
-    toast(S.mode === 'demo' ? 'Demo mode: saved to the sample Drafts folder.' : 'Saved to your Outlook Drafts.', 'ok', 5000);
-  } catch (e) {
-    fail(e);
-  }
-  renderCompose();
+// People search: Outlook's people list when allowed, otherwise the people in your chats.
+async function findPeople(q = '') {
+  if (can('people')) return S.api.people(q);
+  if (!S.chats) S.chats = await S.api.chats(myAddr()).catch(() => []);
+  const ql = q.toLowerCase();
+  return S.chats.map((c) => ({ ...c.person, company: '', jobTitle: '', phones: [] })).filter((x) => !ql || `${x.name} ${x.email}`.toLowerCase().includes(ql));
 }
 
 // ---------- chats: all emails with one person, messenger style ----------
@@ -841,7 +994,7 @@ async function openChats() {
   E.list.innerHTML = `
     <div class="list-head">
       <button class="icon-btn only-mobile" data-act="menu" aria-label="Menu">${ICON.menu}</button>
-      <h2>Chats</h2>
+      ${viewSwitch('chats')}
       <button class="icon-btn" data-act="chats-refresh" title="Refresh" aria-label="Refresh">${ICON.refresh}</button>
     </div>
     <label class="search">${ICON.search}<input id="chq" type="search" placeholder="Search people" value="${esc(S.chatQ)}" autocomplete="off"></label>
@@ -856,6 +1009,7 @@ async function openChats() {
     S.chats ||= [];
   }
   if (S.view === 'chats') { renderChatItems(); renderSidebar(); }
+  prepareDrafts();
 }
 
 function renderChatItems() {
@@ -871,7 +1025,8 @@ function renderChatItems() {
       ${avatar(c.person, 44)}
       <div class="item-main">
         <div class="item-top"><span class="from">${pin ? `<span class="pin-ic">${ICON.pin}</span>` : ''}${esc(c.person.name)}</span>${c.last ? `<time>${esc(fmtDate(c.last.date))}</time>` : ''}</div>
-        <div class="prev">${c.last ? `${c.last.out ? '<span class="you">You: </span>' : ''}${esc(c.last.preview || c.last.subject)}` : `<span class="you">${esc(c.person.email)}</span>`}</div>
+        <div class="prev">${c.last ? `${c.last.out ? `<span class="you">${c.last.scheduled ? 'Scheduled: ' : 'You: '}</span>` : ''}${esc(c.last.preview || c.last.subject)}` : `<span class="you">${esc(c.person.email)}</span>`}</div>
+        ${hasReadyTag(c.last) ? READY_TAG : ''}
       </div>
       ${c.unread ? `<span class="badge-n">${c.unread}</span>` : ''}
     </div>`;
@@ -903,7 +1058,7 @@ async function openChat(person) {
   for (const m of unread) {
     m.isRead = true;
     bumpUnread(m.folderId, -1);
-    S.api.markRead(m.id, true).catch(() => {});
+    if (can('send')) S.api.markRead(m.id, true).catch(() => {});
   }
   const entry = S.chats?.find((c) => c.person.email === person.email);
   if (entry && entry.unread) { entry.unread = 0; renderChatItems(); renderSidebar(); }
@@ -931,7 +1086,7 @@ function drawChat() {
       <div class="bubble">
         ${showSubj ? `<div class="b-subj">${esc(m.subject.replace(/^((re|fw|fwd|aw|sv):\s*)+/i, ''))}</div>` : ''}
         <div class="b-text">${esc(short || m.preview || '(empty message)')}</div>
-        <div class="b-meta">${m.hasAttachments ? `<span class="b-att">${ICON.clip}</span>` : ''}${m.cc?.length ? `<span>+${m.cc.length} cc</span>` : ''}<button class="link" data-act="chat-open" data-id="${esc(m.id)}">Open email</button><time title="${esc(fmtFull(m.date))}">${esc(new Date(m.date).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))}</time></div>
+        <div class="b-meta">${m.hasAttachments ? `<span class="b-att">${ICON.clip}</span>` : ''}${m.cc?.length ? `<span>+${m.cc.length} cc</span>` : ''}${m.scheduled ? `<span class="sched">${ICON.clock}Scheduled ${esc(fmtWhen(m.scheduled))}</span>` : `<button class="link" data-act="chat-open" data-id="${esc(m.id)}">Open email</button>`}<time title="${esc(fmtFull(m.date))}">${esc(new Date(m.date).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))}</time></div>
       </div>
     </div>`;
   }).join('');
@@ -950,6 +1105,7 @@ function drawChat() {
   const body = $('#chatBody');
   body.scrollTop = body.scrollHeight;
   wireDraftArea();
+  maybeAutoDraft();
 }
 
 // ---------- contacts ----------
@@ -962,7 +1118,7 @@ function openContacts() {
     <label class="search">${ICON.search}<input id="cq" type="search" placeholder="Search people" value="${esc(S.contactQ)}" autocomplete="off"></label>
     <div class="tabs">
       <button data-act="ctab" data-tab="frequent" class="${S.contactsTab === 'frequent' ? 'on' : ''}">People you email</button>
-      <button data-act="ctab" data-tab="outlook" class="${S.contactsTab === 'outlook' ? 'on' : ''}">Saved contacts</button>
+      ${can('contacts') ? `<button data-act="ctab" data-tab="outlook" class="${S.contactsTab === 'outlook' ? 'on' : ''}">Saved contacts</button>` : ''}
     </div>
     <div class="items" id="citems">${skeleton(6)}</div>`;
   if (S.contact) renderContact(S.contact);
@@ -975,11 +1131,11 @@ async function loadContacts() {
   const seq = ++S.contactSeq;
   let list = [];
   try {
-    if (S.contactsTab === 'outlook') {
+    if (S.contactsTab === 'outlook' && can('contacts')) {
       S.contacts ??= await S.api.contacts();
       list = q ? S.contacts.filter((x) => `${x.name} ${x.email} ${x.company}`.toLowerCase().includes(q)) : S.contacts;
     } else {
-      list = await S.api.people(q);
+      list = await findPeople(q);
     }
   } catch (e) {
     fail(e);
@@ -1040,26 +1196,46 @@ function openSettings(section) {
     <div class="thread-head"><button class="icon-btn only-mobile" data-act="back" aria-label="Back">${ICON.back}</button><h1>Settings</h1><span class="saved-note" id="savedNote"></span></div>
 
     <section class="card" id="sec-ms"><h3>Microsoft 365</h3>
-      ${S.mode === 'live' ? `<p>Signed in as <b>${esc(S.me?.email || '')}</b>.</p>` : S.mode === 'demo' ? '<p class="muted">You are in demo mode. Add the IDs from IT, then use <b>Exit demo</b> in the sidebar and sign in.</p>' : ''}
+      ${S.mode === 'live' ? `<p>Signed in as <b>${esc(S.me?.email || '')}</b>.</p>` : S.mode === 'demo' ? '<p class="muted">You are in demo mode, which shows every feature. Add the IDs from IT, then use <b>Exit demo</b> in the sidebar and sign in.</p>' : ''}
       <div class="grid2">
         <label>Application (client) ID<input data-set="clientId" value="${esc(c.clientId)}" placeholder="${esc(CONFIG.clientId || 'from IT')}" spellcheck="false" autocomplete="off"></label>
         <label>Directory (tenant) ID<input data-set="tenantId" value="${esc(c.tenantId)}" placeholder="${esc(CONFIG.tenantId || 'from IT')}" spellcheck="false" autocomplete="off"></label>
       </div>
       <p class="muted small">Redirect URI for IT: <code>${esc(auth.redirectUri())}</code> <button class="link" data-act="copy-text" data-text="${esc(auth.redirectUri())}">Copy</button></p>
-      <label>Shared mailboxes <span class="muted small">(one per line, e.g. info@company.com)</span>
-        <textarea data-set="sharedMailboxes" rows="3" placeholder="info@company.com" spellcheck="false">${esc(c.sharedMailboxes)}</textarea></label>
-      <p class="muted small">Use mailboxes you can already open in Outlook. Switch between them at the top of the sidebar. Sending from a shared mailbox also needs "Send as" rights on it.</p>
+      <h4>What the app may do in Outlook</h4>
+      <p class="muted small">It starts read-only. Switch on only what IT has approved; Microsoft asks for the extra permission the next time you sign in.</p>
+      <div class="perm"><span class="check on">${ICON.shield}</span><div class="grow"><b>Read my mail</b><small>User.Read, Mail.Read · always on</small></div>${permChip(true, true)}</div>
+      ${permRow('accSend', 'Send and schedule from the app', 'Mail.Send, Mail.ReadWrite. Without it: Reply in Outlook (copy and paste).', c.accSend, can('send'))}
+      ${permRow('accShared', 'Shared mailboxes', `${c.accSend ? 'Mail.ReadWrite.Shared, Mail.Send.Shared' : 'Mail.Read.Shared'}. Mailboxes you can already open in Outlook.`, c.accShared, can('shared'))}
+      ${permRow('accContacts', 'Outlook contacts and people search', 'Contacts.Read, People.Read. Without it: people come from your chats.', c.accContacts, can('contacts'))}
+      ${S.mode === 'live' && ((c.accSend && !can('send')) || (c.accShared && !can('shared')) || (c.accContacts && !can('contacts'))) ? '<div class="row"><button class="btn primary" data-act="signin-again">Sign in again to allow</button><span class="muted small">If Microsoft says admin approval is needed, IT has to approve it first.</span></div>' : ''}
+      ${c.accShared || S.mode === 'demo' ? `<label>Shared mailboxes <span class="muted small">(one per line, e.g. info@company.com)</span>
+        <textarea data-set="sharedMailboxes" rows="3" placeholder="info@company.com" spellcheck="false">${esc(c.sharedMailboxes)}</textarea></label>` : ''}
     </section>
 
     <section class="card" id="sec-ai"><h3>Claude (drafting)</h3>
+      <div class="radios" role="radiogroup" aria-label="What Claude may see">
+        ${[
+          ['off', 'Off', 'Nothing leaves Microsoft and this browser. Drafts come from your standard answers; you edit them yourself.'],
+          ['note', 'My draft only', "Claude sees your draft and what you type, never the customer's email."],
+          ['full', 'Full', 'Claude reads the email thread and writes the reply. Best drafts.'],
+        ].map(([v, l, d]) => `<label class="radio ${c.aiMode === v ? 'on' : ''}"><input type="radio" name="aiMode" data-set="aiMode" value="${v}" ${c.aiMode === v ? 'checked' : ''}><span><b>${l}</b><small>${d}</small></span></label>`).join('')}
+      </div>
+      <label class="check"><input type="checkbox" data-set="autoDraft" ${c.autoDraft ? 'checked' : ''} ${c.aiMode !== 'full' ? 'disabled' : ''}> Prepare replies automatically for new customer emails (Full mode, about 1 to 3 US cents each)</label>
       <label>API key
         <div class="row"><input id="apiKey" type="password" value="${esc(c.apiKey)}" placeholder="sk-ant-…" autocomplete="off" spellcheck="false"><button class="btn" data-act="toggle-key">Show</button><button class="btn" data-act="test-key">Test</button></div>
       </label>
-      <p class="muted small">Stored only in this browser and sent only to Anthropic. Create one in the <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener">Claude Console</a>. Each draft typically costs about one to three US cents.</p>
+      <p class="muted small">Stored only in this browser and sent only to Anthropic. Create one in the <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener">Claude Console</a>.</p>
       <div class="grid2">
         <label>Model<select data-set="model" id="modelSel"><option value="">Automatic (newest Sonnet)</option>${c.model ? `<option value="${esc(c.model)}" selected>${esc(ai.prettyModel(c.model))}</option>` : ''}</select></label>
         <label>Speed<select data-set="effort">${[['low', 'Fast'], ['medium', 'Balanced'], ['high', 'Thorough']].map(([v, l]) => `<option value="${v}" ${c.effort === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       </div>
+    </section>
+
+    <section class="card" id="sec-answers"><h3>Standard answers</h3>
+      <p class="muted small">The app picks the best fit by keywords and has it ready when the email opens. Start each answer with <code>## Name</code>, then <code>keywords: …</code>. <code>{first}</code> becomes the first name; <code>[brackets]</code> mark what to fill in (Send warns you if any are left).</p>
+      <textarea data-set="answers" rows="16" spellcheck="false">${esc(c.answers || DEFAULT_ANSWERS)}</textarea>
+      <div class="row end"><button class="link small" data-act="reset-answers">Reset to default</button></div>
     </section>
 
     <section class="card" id="sec-style"><h3>Writing style</h3>
@@ -1074,12 +1250,12 @@ function openSettings(section) {
       <label class="check"><input type="checkbox" data-set="useExamples" ${c.useExamples ? 'checked' : ''}> Learn my tone from my 4 most recent sent emails to people outside the company</label>
     </section>
 
-    <section class="card" id="sec-out"><h3>Outlook drafts</h3>
-      <label class="check"><input type="checkbox" data-set="addSignature" ${c.addSignature ? 'checked' : ''}> Add my signature to drafts saved to Outlook</label>
-      <p class="muted small">Outlook doesn't add your signature to drafts created by apps, so paste it below once (copy it from one of your sent emails). When you use <b>Copy</b> and paste into an Outlook reply instead, Outlook adds your signature as usual.</p>
+    <section class="card" id="sec-out"><h3>Sending</h3>
+      <label class="check"><input type="checkbox" data-set="addSignature" ${c.addSignature ? 'checked' : ''}> Add my signature to emails sent from the app</label>
+      <p class="muted small">Outlook doesn't add your signature to emails sent by apps, so paste it below once (copy it from one of your sent emails). With <b>Reply in Outlook</b>, Outlook adds it as usual.</p>
       <div class="sig" id="sigBox" contenteditable="true" aria-label="Signature">${sanitizeBasic(c.signatureHtml || '')}</div>
       <div class="grid2">
-        <label>Draft font<input data-set="draftFont" value="${esc(c.draftFont)}" autocomplete="off"></label>
+        <label>Email font<input data-set="draftFont" value="${esc(c.draftFont)}" autocomplete="off"></label>
         <label class="check pad"><input type="checkbox" data-set="loadImages" ${c.loadImages ? 'checked' : ''}> Load images in emails automatically</label>
       </div>
     </section>
@@ -1093,6 +1269,9 @@ function openSettings(section) {
   if (c.apiKey) fillModels();
   if (section) $(`#sec-${section}`)?.scrollIntoView({ block: 'start' });
 }
+
+const permChip = (want, has) => (S.mode !== 'live' ? '' : has ? '<span class="chip ok">Allowed</span>' : want ? '<span class="chip wait">Sign in to allow</span>' : '');
+const permRow = (key, title, sub, on, has) => `<label class="perm"><input type="checkbox" data-set="${key}" ${on ? 'checked' : ''}><div class="grow"><b>${esc(title)}</b><small>${esc(sub)}</small></div>${permChip(on, has)}</label>`;
 
 async function fillModels() {
   const sel = $('#modelSel');
@@ -1118,7 +1297,17 @@ const flashSaved = debounce(() => {
 const pendingSaves = {};
 function saveField(key, value) {
   clearTimeout(pendingSaves[key]);
-  pendingSaves[key] = setTimeout(() => { setCfg({ [key]: value }); flashSaved(); if (key === 'sharedMailboxes') renderSidebar(); }, 350);
+  pendingSaves[key] = setTimeout(() => {
+    setCfg({ [key]: value });
+    flashSaved();
+    if (key === 'sharedMailboxes') renderSidebar();
+    if (key === 'answers') S.drafts = new Map();
+  }, 350);
+}
+function keepScroll(fn) {
+  const y = E.detail.scrollTop;
+  fn();
+  E.detail.scrollTop = y;
 }
 
 // ---------- layout helpers ----------
@@ -1183,6 +1372,13 @@ async function onClick(ev) {
       return openFolder(f);
     }
     case 'chats': return openChats();
+    case 'email': {
+      S.sel = null;
+      S.chat = null;
+      if (!S.chats) S.api.chats(myAddr()).then((c) => { S.chats = c; renderItems(); }).catch(() => {});
+      E.app.classList.remove('show-detail');
+      return openFolder(S.folder || S.folders.main[0] || { id: 'inbox', name: 'Inbox', key: 'inbox' });
+    }
     case 'chats-refresh': S.chats = null; return openChats();
     case 'chat': {
       const p = S.chats?.find((x) => x.person.email === t.dataset.email)?.person || getPins().find((x) => x.email === t.dataset.email);
@@ -1198,7 +1394,7 @@ async function onClick(ev) {
     }
     case 'chat-contact': {
       const p = S.chat.person;
-      S.contact = (await S.api.people(p.email).catch(() => []))[0] || { name: p.name, email: p.email, phones: [] };
+      S.contact = (await findPeople(p.email).catch(() => []))[0] || { name: p.name, email: p.email, phones: [] };
       return openContacts();
     }
     case 'compose': return openCompose();
@@ -1246,26 +1442,39 @@ async function onClick(ev) {
     }
     case 'focus-reply': {
       $('#assistant')?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-      return setTimeout(() => $('#note')?.focus(), 250);
+      return setTimeout(() => ($('#draftText:not(:placeholder-shown)') || $('#revise') || $('#draftText'))?.focus(), 250);
     }
     case 'mode': {
       const st = replyState();
       st.mode = t.dataset.mode;
-      st.saved = null;
       return rerenderPanel();
     }
-    case 'draft': return runDraft();
-    case 'revise': {
-      const v = $('#revise')?.value.trim();
-      if (!v) return $('#revise')?.focus();
-      return runDraft(v);
-    }
+    case 'revise': return runDraft();
     case 'quick-revise': return runDraft(QUICK[t.dataset.rev]);
-    case 'copy-draft': return copyDraft();
-    case 'save-draft': return saveReplyDraft(t);
-    case 'save-new': return saveNewDraft(t);
-    case 'send-reply': return sendDraft(t, false);
-    case 'send-new': return sendDraft(t, true);
+    case 'send-reply': return queueSend(false);
+    case 'send-new': return queueSend(true);
+    case 'undo-send': return undoSend();
+    case 'outlook-reply': return replyInOutlook(false);
+    case 'outlook-new': return replyInOutlook(true);
+    case 'sched-menu': {
+      const st = S.view === 'compose' ? S.compose : replyState();
+      st.schedOpen = !st.schedOpen;
+      return rerenderPanel();
+    }
+    case 'schedule': return queueSend(S.view === 'compose', new Date(t.dataset.at));
+    case 'schedule-pick': {
+      const v = $('#schedAt')?.value;
+      if (!v) return $('#schedAt')?.focus();
+      return queueSend(S.view === 'compose', new Date(v));
+    }
+    case 'signin-again': return auth.login();
+    case 'reset-answers': {
+      setCfg({ answers: '' });
+      const ta = $('textarea[data-set="answers"]');
+      ta.value = DEFAULT_ANSWERS;
+      grow(ta);
+      return flashSaved();
+    }
     case 'pin': {
       const p = S.chat?.person.email === t.dataset.email ? S.chat.person : S.contact?.email === t.dataset.email ? S.contact : { name: t.dataset.name, email: t.dataset.email };
       togglePin(p);
@@ -1340,9 +1549,7 @@ function onInput(ev) {
   if (el.id === 'chq') { S.chatQ = el.value; return renderChatItems(); }
   if (el.id === 'cTo') { S.compose.to = el.value; return suggest(el.value); }
   if (el.matches('textarea')) grow(el);
-  if (el.id === 'note' && S.sel) replyState().note = el.value;
-  if (el.id === 'cNote') S.compose.note = el.value;
-  if (el.id === 'draftText') { const st = S.view === 'compose' ? S.compose : replyState(); st.text = el.value; }
+  if (el.id === 'draftText') { const st = S.view === 'compose' ? S.compose : replyState(); st.text = el.value; st.bracketOk = false; }
   if (el.id === 'sigBox') return saveField('signatureHtml', sanitizeBasic(el.innerHTML));
   if (el.dataset.set && el.type !== 'checkbox' && el.tagName !== 'SELECT') return saveField(el.dataset.set, el.value);
 }
@@ -1351,10 +1558,25 @@ const debounceContacts = debounce(() => loadContacts(), 300);
 async function onChange(ev) {
   const el = ev.target;
   if (el.id === 'mboxSel') return switchMailbox(el.value);
+  if (el.id === 'answerSel') {
+    const st = replyState();
+    const a = [...answers(), GENERIC].find((x) => x.name === el.value);
+    if (!a) return;
+    Object.assign(st, { text: fillAnswer(a, replyTarget().from), source: 'standard', answer: a.name });
+    return rerenderPanel();
+  }
+  if (el.type === 'radio' && el.dataset.set) {
+    setCfg({ [el.dataset.set]: el.value });
+    S.drafts = new Map();
+    flashSaved();
+    return keepScroll(() => openSettings());
+  }
   if (el.dataset.set && (el.type === 'checkbox' || el.tagName === 'SELECT')) {
     setCfg({ [el.dataset.set]: el.type === 'checkbox' ? el.checked : el.value });
     if (el.dataset.set === 'useExamples') S.examples = null;
-    return flashSaved();
+    flashSaved();
+    if (/^acc|autoDraft/.test(el.dataset.set)) { S.drafts = new Map(); keepScroll(() => openSettings()); renderSidebar(); }
+    return;
   }
   if (el.id === 'apiKey') { setCfg({ apiKey: el.value.trim() }); store.del('autoModel'); flashSaved(); return fillModels(); }
   if (el.id === 'importFile' && el.files?.[0]) {
@@ -1372,14 +1594,15 @@ async function onChange(ev) {
 
 function onKey(ev) {
   const el = ev.target;
-  if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter' && (el.id === 'note' || el.id === 'cNote')) {
-    ev.preventDefault();
-    return runDraft();
-  }
   if (ev.key === 'Enter' && el.id === 'revise') {
     ev.preventDefault();
     if (el.value.trim()) runDraft(el.value.trim());
     return;
+  }
+  if (ev.key === 'Escape' && $('.sched-menu')) {
+    const st = S.view === 'compose' ? S.compose : replyState();
+    st.schedOpen = false;
+    rerenderPanel();
   }
   if ((ev.key === 'Enter' || ev.key === ' ') && el.matches?.('.item[data-act]')) {
     ev.preventDefault();

@@ -326,3 +326,71 @@ label.check input { width: 16px; height: 16px; accent-color: var(--accent); }
   .welcome-card { margin: 0; border-radius: 0; border: 0; padding: 22px 18px; }
   .welcome-demo { flex-direction: column; align-items: flex-start; }
 }
+
+/* ---------- Chats / Email switch ---------- */
+.view-seg { flex: 1; display: flex; padding: 3px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 11px; min-width: 0; }
+.view-seg button { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; border: 0; background: none; border-radius: 8px; color: var(--muted); font: inherit; font-weight: 550; cursor: pointer; }
+.view-seg button svg { width: 16px; height: 16px; }
+.view-seg button.on { background: var(--panel); color: var(--text); font-weight: 650; box-shadow: var(--shadow); }
+.folder-line { padding: 0 18px 8px; font-size: 13px; color: var(--muted); }
+.folder-line b { color: var(--text); font-weight: 650; }
+
+/* ---------- ready drafts ---------- */
+.ready-tag { display: inline-flex; align-items: center; gap: 4px; margin-top: 4px; padding: 2px 8px; border-radius: 99px; background: var(--ai-soft); color: #5b3fc4; font-size: 11.5px; font-weight: 650; }
+.ready-tag svg { width: 11px; height: 11px; }
+@media (prefers-color-scheme: dark) { .ready-tag { color: #c4b5fd; } }
+.assistant.has-draft .draft-text { background: var(--panel); border-style: dashed; border-color: #8b7cf0; }
+.assistant .draft { border-top: 0; padding-top: 0; }
+.pick-answer { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.pick-answer select { width: auto; flex: 1; max-width: 320px; }
+.ro-note { margin: 0; }
+.sr { position: absolute; left: -9999px; }
+
+/* ---------- send bar ---------- */
+.as-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.as-bar .grow { flex: 1; }
+.change { flex: 1 1 260px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--line-2); border-radius: 22px; padding: 0 5px 0 14px; background: var(--panel-2); min-width: 0; }
+.change:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.change input { flex: 1; min-width: 0; border: 0; background: none; padding: 10px 0; box-shadow: none !important; }
+.ai-go { width: 34px; height: 34px; flex: none; border: 0; border-radius: 17px; background: var(--ai); color: #fff; display: grid; place-items: center; cursor: pointer; }
+.ai-go svg { width: 16px; height: 16px; }
+.ai-go:disabled { opacity: .5; cursor: default; }
+.as-bar > .btn, .sched-wrap > .btn { min-height: 42px; }
+.as-bar .btn.primary { padding: 0 20px; }
+.sched-wrap { position: relative; }
+.sched-wrap .btn svg:last-child { width: 14px; height: 14px; }
+.sched-menu { position: absolute; right: 0; bottom: calc(100% + 6px); width: 270px; z-index: 20; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px rgba(16, 24, 40, .18); padding: 6px; display: flex; flex-direction: column; }
+.sched-h { padding: 8px 10px 4px; font-size: 11.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.sched-menu > button { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 40px; padding: 0 10px; border: 0; border-radius: 8px; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.sched-menu > button:hover, .sched-menu > button:focus-visible { background: var(--accent-soft); }
+.sched-menu small { color: var(--muted); }
+.sched-pick { display: flex; gap: 6px; padding: 8px 4px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
+.sched-pick input { flex: 1; min-width: 0; }
+.pending { position: relative; overflow: hidden; display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 0 6px 0 14px; border-radius: 10px; background: var(--accent-soft); color: var(--text); font-weight: 600; }
+.pending-bar { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--accent); animation: pending 5s linear forwards; }
+@keyframes pending { from { width: 0; } to { width: 100%; } }
+.sched { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-weight: 600; }
+.sched svg { width: 12px; height: 12px; }
+
+/* ---------- settings ---------- */
+.settings h4 { margin: 8px 0 0; font-size: 14px; }
+.perm { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+.perm input { width: 18px; height: 18px; accent-color: var(--accent); flex: none; }
+.perm .check.on svg { width: 18px; height: 18px; color: #12805c; }
+.perm small, .radio small { display: block; color: var(--muted); font-size: 12.5px; font-weight: 400; margin-top: 2px; }
+.radios { display: grid; gap: 8px; }
+.radio { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+.radio.on { border-color: var(--accent); background: var(--accent-soft); }
+.radio input { margin-top: 3px; accent-color: var(--accent); }
+@media (max-width: 700px) {
+  .as-bar { gap: 6px; }
+  .change { flex-basis: 100%; }
+  .sched-wrap, .as-bar > .btn.primary { flex: 1; }
+  .sched-wrap > .btn { width: 100%; justify-content: center; }
+  .as-bar > .btn.primary { justify-content: center; }
+  .sched-menu { left: 0; right: auto; }
+}
+.chat .assistant { overflow: visible; max-height: none; }
+.chat .draft-text { max-height: 34vh; overflow-y: auto; min-height: 120px; }
+label.change { flex-direction: row; align-items: center; gap: 6px; font-weight: 400; color: inherit; margin: 0; }
+@media (max-width: 700px) { .chat .draft-text { max-height: 28vh; } }

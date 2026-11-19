@@ -71,8 +71,15 @@ export const graph = {
     known = {};
   },
 
-  // Sends a draft created by createReplyDraft or createDraft.
-  async send(draftId) {
+  // Sends a draft created by createReplyDraft or createDraft. With `at` (a Date), Exchange keeps it
+  // in the Outbox and sends it at that time (deferred delivery, the same as Outlook's "Schedule send").
+  async send(draftId, { at } = {}) {
+    if (at) {
+      await call(`${MB}/messages/${draftId}`, {
+        method: 'PATCH',
+        body: { singleValueExtendedProperties: [{ id: 'SystemTime 0x3FEF', value: new Date(at).toISOString() }] },
+      });
+    }
     await call(`${MB}/messages/${draftId}/send`, { method: 'POST' });
   },
 

@@ -110,11 +110,11 @@ export function createDemo() {
       all = box.all;
       drafts = box.drafts;
     },
-    send(draftId) {
+    send(draftId, { at } = {}) {
       const i = drafts.findIndex((d) => d.id === draftId);
       if (i >= 0) {
         const [d] = drafts.splice(i, 1);
-        all.push({ ...d, id: `sent-${Date.now()}`, isDraft: false, folderId: 'sentitems', from: box.self, date: new Date().toISOString() });
+        all.push({ ...d, id: `sent-${Date.now()}`, isDraft: false, folderId: at ? 'outbox' : 'sentitems', from: box.self, date: new Date(at || Date.now()).toISOString(), scheduled: at ? new Date(at).toISOString() : undefined });
       }
       return later();
     },
